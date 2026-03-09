@@ -1,13 +1,71 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import PSBTBuilderGame from "./psbt-builder-game.jsx";
+import { useTheme } from "./theme.jsx";
 
-const C = {
-  bg:"#06090f",surface:"#0d1219",card:"#111923",cardHi:"#151f2d",
-  border:"#1e2d42",borderHi:"#f59e0b",
-  text:"#dfe8f4",soft:"#96a7bf",dim:"#576980",
+// Accent colors are theme-independent — they work on both dark and light
+const A = {
   amber:"#f59e0b",green:"#22c55e",red:"#ef4444",blue:"#3b82f6",
   purple:"#a78bfa",cyan:"#06b6d4",orange:"#fb923c",teal:"#14b8a6",
 };
+// Light accent overrides for better contrast on white
+const AL = {
+  amber:"#d97706",green:"#16a34a",red:"#dc2626",blue:"#2563eb",
+  purple:"#7c3aed",cyan:"#0891b2",orange:"#ea580c",teal:"#0d9488",
+};
+function useC() {
+  const { C: theme } = useTheme();
+  return theme;
+}
+// Module-level C — accent colors for static data definitions (FLOWS, SCENARIOS, etc.)
+// Structural colors (bg, card, border, text, soft, dim) are read from theme at render time
+const C = {
+  bg:"#06090f",surface:"#0d1219",card:"#111923",cardHi:"#151f2d",
+  border:"#1e2d42",borderHi:"#f59e0b",codeBg:"#050910",
+  text:"#dfe8f4",soft:"#96a7bf",dim:"#576980",
+  ...A, isDark:true,
+};
+
+// ━━━ INLINE TEXT FORMATTER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function Fmt({ text, codeBg, accent }) {
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|PSBT_\w+|SIGHASH_\w+|(?<![A-Z_])(?:WITNESS_SCRIPT|WITNESS_UTXO|NON_WITNESS_UTXO|UNSIGNED_TX|PARTIAL_SIG|TAP_KEY_SIG|TAP_INTERNAL_KEY|TAP_BIP32_DERIVATION|FINAL_SCRIPTWITNESS|FINAL_SCRIPTSIG|BIP32_DERIVATION|REDEEM_SCRIPT|TX_MODIFIABLE|TX_VERSION|INPUT_COUNT|OUTPUT_COUNT)(?![A-Z_])|BIP-\d+|OP_[A-Z0-9_]+)/g;
+  const lines = text.split("\n");
+  const mono = "'JetBrains Mono',monospace";
+  return lines.map((line, li) => {
+    if (line.trim() === "") return <div key={li} style={{ height:6 }} />;
+    const bulletMatch = line.match(/^(\u2022|\-)\s+(.*)$/);
+    const numMatch = line.match(/^(\d+)\.\s+(.*)$/);
+    if (bulletMatch || numMatch) {
+      const marker = bulletMatch ? "\u2022" : numMatch[1]+".";
+      const content = bulletMatch ? bulletMatch[2] : numMatch[2];
+      return (
+        <div key={li} style={{ display:"flex", gap:6, paddingLeft:4, marginTop:2, marginBottom:2 }}>
+          <span style={{ color:accent, fontWeight:700, flexShrink:0, minWidth:numMatch?16:8 }}>{marker}</span>
+          <span>{fmt(content)}</span>
+        </div>
+      );
+    }
+    return <div key={li}>{fmt(line)}</div>;
+  });
+  function fmt(line) {
+    const tokens = [];
+    let last = 0, m;
+    while ((m = re.exec(line)) !== null) {
+      if (m.index > last) tokens.push({ t:"t", v:line.slice(last, m.index) });
+      const v = m[0];
+      if (v.startsWith("**")) tokens.push({ t:"b", v:v.slice(2,-2) });
+      else if (v.startsWith("`")) tokens.push({ t:"c", v:v.slice(1,-1) });
+      else tokens.push({ t:"k", v });
+      last = re.lastIndex;
+    }
+    if (last < line.length) tokens.push({ t:"t", v:line.slice(last) });
+    return tokens.map((tk,i) => {
+      if (tk.t === "b") return <strong key={i} style={{ fontWeight:700 }}>{tk.v}</strong>;
+      if (tk.t === "c") return <code key={i} style={{ background:codeBg, padding:"1px 5px", borderRadius:4, fontSize:11.5, fontFamily:mono }}>{tk.v}</code>;
+      if (tk.t === "k") return <code key={i} style={{ fontFamily:mono, fontSize:"0.92em", fontWeight:600, opacity:0.9 }}>{tk.v}</code>;
+      return <span key={i}>{tk.v}</span>;
+    });
+  }
+}
 
 const PSBT_EXAMPLES = [
   {id:"v0-creator",label:"v0: Creator Output",cat:"v0",desc:"BIP-174 test vector: unsigned tx, 2 inputs (P2SH-P2WPKH + P2SH-P2WSH), 2 P2WPKH outputs. No metadata yet.",
@@ -526,12 +584,13 @@ const V2_OUTPUT = [
 ];
 
 const ROLES = [
-  {id:"creator",name:"Creator",icon:"✦",color:C.amber,short:"Initializes the PSBT structure",full:"In v0: creates unsigned tx (empty scriptSigs, no witnesses) wrapped in PSBT format. In v2: sets global fields (version, tx_version, counts) and per-input/per-output maps.\n\nNeeds to know which UTXOs to spend and destinations, but NOT private keys. Often the same software as the Updater (e.g., watch-only wallet).",produces:"PSBT with tx skeleton",consumes:"User intent: UTXOs, destinations, fees"},
-  {id:"updater",name:"Updater",icon:"⬆",color:C.blue,short:"Adds UTXO data, scripts, derivation paths",full:"Enriches the PSBT with everything signers need: UTXO info (for sighash + amount verification), scripts (for spending conditions), BIP32 paths (for key location).\n\nNo private keys needed — works with public data. Common pattern: watch-only wallet = Creator + Updater, hands to hardware wallet (Signer). In v2, extended by the Constructor role.",produces:"Enriched PSBT",consumes:"PSBT + UTXO database + pubkey material"},
-  {id:"signer",name:"Signer",icon:"✍",color:C.green,short:"Produces partial signatures with private keys",full:"The ONLY role needing private keys. For each signable input:\n1. Determine script type from UTXO + scripts\n2. Compute sighash (BIP-143 for SegWit)\n3. Sign with ECDSA/Schnorr\n4. Store as PARTIAL_SIG\n\nMUST reject if: unknown version, sighash fails, unreasonable fee, malformed PSBT. Hardware wallets display tx details on secure screen before signing.",produces:"PSBT with partial sigs",consumes:"Enriched PSBT + private keys"},
-  {id:"combiner",name:"Combiner",icon:"⊕",color:C.purple,short:"Merges PSBTs with different signatures",full:"Takes 2+ PSBTs for the same tx with different sigs and unions their key-value pairs. Same key in multiple PSBTs → values MUST be identical. Different-pubkey PARTIAL_SIGs merge naturally.\n\nPerforms NO validation (that's the Finalizer). Essential for geographically separated multisig co-signers.",produces:"Single merged PSBT",consumes:"2+ PSBTs for same tx"},
-  {id:"finalizer",name:"Finalizer",icon:"◉",color:C.orange,short:"Builds final scriptSig/scriptWitness",full:"Converts partial sigs into spending proofs:\n\n• P2PKH: scriptSig = <sig> <pubkey>\n• P2WPKH: witness = [<sig>, <pubkey>]\n• P2SH-P2WPKH: scriptSig = <redeemScript>, witness = [<sig>, <pubkey>]\n• P2WSH multisig: witness = [OP_0, <sig1>, <sig2>, <witnessScript>]\n\nStrips all non-final fields. Irreversible — must understand Bitcoin Script.",produces:"Finalized PSBT",consumes:"PSBT with sufficient sigs"},
-  {id:"extractor",name:"Extractor",icon:"→",color:C.cyan,short:"Produces broadcast-ready transaction",full:"Final role. Verifies all inputs finalized, takes unsigned tx (v0) or reconstructs from decomposed fields (v2), inserts FINAL_SCRIPTSIG and FINAL_SCRIPTWITNESS, serializes complete signed transaction.\n\nOutput = raw tx hex for sendrawtransaction RPC or block explorer broadcast. PSBT can then be discarded.",produces:"Raw signed tx (hex)",consumes:"Fully finalized PSBT"},
+  {id:"creator",name:"Creator",icon:"✦",color:C.amber,short:"Initializes the PSBT structure",v2:false,full:"**v0:** Creates an unsigned transaction (empty scriptSigs, no witnesses) and wraps it in PSBT_GLOBAL_UNSIGNED_TX.\n**v2:** Sets global fields (TX_VERSION, INPUT_COUNT, OUTPUT_COUNT, TX_MODIFIABLE) and populates per-input/per-output maps with tx data.\n\nNeeds to know which UTXOs to spend and destinations, but **not** private keys. Often the same software as the Updater (e.g., a watch-only wallet).",produces:"PSBT with tx skeleton",consumes:"User intent: UTXOs, destinations, fees"},
+  {id:"updater",name:"Updater",icon:"⬆",color:C.blue,short:"Adds UTXO data, scripts, derivation paths",v2:false,full:"Enriches the PSBT with everything signers need:\n\n- WITNESS_UTXO or NON_WITNESS_UTXO — for sighash computation + amount verification\n- REDEEM_SCRIPT / WITNESS_SCRIPT — for spending conditions\n- BIP32_DERIVATION — so hardware wallets can locate their keys\n- SIGHASH_TYPE — which sighash mode to use\n\n**No private keys needed** — works entirely with public data.\n\nCommon pattern: watch-only wallet = Creator + Updater, then hands to a hardware wallet (Signer). In v2, extended by the Constructor role.",produces:"Enriched PSBT",consumes:"PSBT + UTXO database + pubkey material"},
+  {id:"constructor",name:"Constructor",icon:"⊞",color:C.teal,short:"Adds/removes inputs and outputs (v2 only)",v2:true,full:"**v2-only role** — does not exist in v0.\n\nModifies the transaction structure while TX_MODIFIABLE flags allow it:\n\n- Adds inputs (increments INPUT_COUNT, adds input map with PREVIOUS_TXID + OUTPUT_INDEX)\n- Adds outputs (increments OUTPUT_COUNT, adds output map with AMOUNT + SCRIPT)\n- Removes inputs/outputs before signing begins\n\nCritical for **CoinJoin** and **PayJoin**: each participant's wallet acts as a Constructor, adding their inputs and outputs to a shared PSBT. The coordinator clears TX_MODIFIABLE to 0x00 when construction is complete.\n\nIn v0, the transaction structure is fixed by the Creator — there is no way to add inputs or outputs after creation.",produces:"Modified PSBT with added I/O",consumes:"Modifiable PSBT (TX_MODIFIABLE flags set)"},
+  {id:"signer",name:"Signer",icon:"✍",color:C.green,short:"Produces partial signatures with private keys",v2:false,full:"The **only** role that needs private keys. For each signable input:\n\n1. Determine script type from WITNESS_UTXO + scripts\n2. Compute sighash (BIP-143 for SegWit, BIP-341 for Taproot)\n3. Sign with ECDSA (P2WPKH/P2WSH) or Schnorr (P2TR)\n4. Store as PARTIAL_SIG or TAP_KEY_SIG\n\n**Must reject if:** unknown PSBT version, sighash computation fails, unreasonable fee, or malformed data. Hardware wallets display tx details on a secure screen before signing.",produces:"PSBT with partial sigs",consumes:"Enriched PSBT + private keys"},
+  {id:"combiner",name:"Combiner",icon:"⊕",color:C.purple,short:"Merges PSBTs with different signatures",v2:false,full:"Takes 2+ PSBTs for the same transaction and unions their key-value pairs.\n\n- Same key in multiple PSBTs → values **must** be identical\n- Different-pubkey PARTIAL_SIG entries merge naturally (different keys)\n- Performs **no validation** — that's the Finalizer's job\n\nEssential for geographically separated multisig co-signers: Alice signs in Tokyo, Bob signs in Berlin, Combiner merges both.",produces:"Single merged PSBT",consumes:"2+ PSBTs for same tx"},
+  {id:"finalizer",name:"Finalizer",icon:"◉",color:C.orange,short:"Builds final scriptSig/scriptWitness",v2:false,full:"Converts partial sigs into complete spending proofs:\n\n- **P2PKH:** `scriptSig = <sig> <pubkey>`\n- **P2WPKH:** `witness = [sig, pubkey]` — 2 items\n- **P2SH-P2WPKH:** `scriptSig = <redeemScript>` + `witness = [sig, pubkey]`\n- **P2WSH multisig:** `witness = [OP_0, sig1, sig2, witnessScript]` — 4 items\n- **P2TR key-path:** `witness = [schnorr_sig]` — just 1 item!\n\nStrips all non-final fields (WITNESS_UTXO, BIP32_DERIVATION, PARTIAL_SIG, etc.). This step is **irreversible** — the Finalizer must understand Bitcoin Script.",produces:"Finalized PSBT",consumes:"PSBT with sufficient sigs"},
+  {id:"extractor",name:"Extractor",icon:"→",color:C.cyan,short:"Produces broadcast-ready transaction",v2:false,full:"Final role — produces a broadcast-ready transaction.\n\n1. Verify all inputs are finalized\n2. **v0:** Take UNSIGNED_TX from global map\n   **v2:** Reconstruct unsigned tx from decomposed fields\n3. Insert FINAL_SCRIPTSIG and FINAL_SCRIPTWITNESS into the tx\n4. Serialize the complete signed transaction\n\nOutput = raw tx hex for `sendrawtransaction` RPC or block explorer broadcast. The PSBT can then be discarded.",produces:"Raw signed tx (hex)",consumes:"Fully finalized PSBT"},
 ];
 
 const DIFFS = [
@@ -546,35 +605,44 @@ const DIFFS = [
 ];
 
 
-// ━━━ UTILITY COMPONENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━ UTILITY COMPONENTS (theme-aware) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 const Badge = ({children,color=C.amber,small}) => (
   <span style={{display:"inline-flex",alignItems:"center",padding:small?"1px 7px":"3px 10px",borderRadius:4,fontSize:small?10:11,fontWeight:700,background:color+"15",color,border:`1px solid ${color}35`,letterSpacing:"0.03em",fontFamily:"'JetBrains Mono',monospace",whiteSpace:"nowrap"}}>{children}</span>
 );
-const Mono = ({children,color=C.text,sz=12}) => (
-  <code style={{fontFamily:"'JetBrains Mono',monospace",fontSize:sz,color,wordBreak:"break-all"}}>{children}</code>
-);
-const Card = ({children,style={}}) => (
-  <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:24,...style}}>{children}</div>
-);
-const Head = ({children,icon,color=C.amber,sub}) => (
-  <div style={{marginBottom:18}}>
-    <div style={{display:"flex",alignItems:"center",gap:10}}>
-      {icon&&<span style={{fontSize:22}}>{icon}</span>}
-      <h3 style={{margin:0,fontSize:18,fontWeight:800,color,letterSpacing:"-0.01em"}}>{children}</h3>
+const Mono = ({children,color,sz=12}) => {
+  const T = useC();
+  return <code style={{fontFamily:"'JetBrains Mono',monospace",fontSize:sz,color:color||T.text,wordBreak:"break-all"}}>{children}</code>;
+};
+const Card = ({children,style={}}) => {
+  const T = useC();
+  return <div style={{background:T.card,border:`1px solid ${T.border}`,borderRadius:12,padding:24,...style}}>{children}</div>;
+};
+const Head = ({children,icon,color=C.amber,sub}) => {
+  const T = useC();
+  return (
+    <div style={{marginBottom:18}}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        {icon&&<span style={{fontSize:22}}>{icon}</span>}
+        <h3 style={{margin:0,fontSize:18,fontWeight:800,color,letterSpacing:"-0.01em"}}>{children}</h3>
+      </div>
+      {sub&&<p style={{margin:"6px 0 0 32px",fontSize:13,color:T.soft,lineHeight:1.7}}>{sub}</p>}
     </div>
-    {sub&&<p style={{margin:"6px 0 0 32px",fontSize:13,color:C.soft,lineHeight:1.7}}>{sub}</p>}
-  </div>
-);
-const InfoBox = ({color=C.cyan,children,icon="•"}) => (
-  <div style={{padding:"14px 18px",borderRadius:10,background:color+"08",border:`1px solid ${color}25`,fontSize:13,color:C.soft,lineHeight:1.75,marginTop:12}}>
-    <span style={{marginRight:8}}>{icon}</span>{children}
-  </div>
-);
+  );
+};
+const InfoBox = ({color=C.cyan,children,icon="•"}) => {
+  const T = useC();
+  return (
+    <div style={{padding:"14px 18px",borderRadius:10,background:color+"08",border:`1px solid ${color}25`,fontSize:13,color:T.soft,lineHeight:1.75,marginTop:12}}>
+      <span style={{marginRight:8}}>{icon}</span>{children}
+    </div>
+  );
+};
 
 // ━━━ HEX VIEWER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function HexViewer({hex,sections}) {
+  const T = useC();
   const [hov,setHov] = useState(null);
   const bytes = useMemo(() => hex.replace(/\s/g,"").match(/.{1,2}/g)||[], [hex]);
   const bmap = useMemo(() => {
@@ -584,12 +652,12 @@ function HexViewer({hex,sections}) {
   }, [bytes,sections]);
   return (
     <div>
-      <div style={{background:"#050910",borderRadius:10,padding:16,border:`1px solid ${C.border}`,lineHeight:2.1,overflowX:"auto"}}>
+      <div style={{background:T.codeBg,borderRadius:10,padding:16,border:`1px solid ${T.border}`,lineHeight:2.1,overflowX:"auto"}}>
         {bytes.map((b,i) => {
           const s=bmap[i]; const hi=hov&&s&&s.id===hov;
           return <span key={i} onMouseEnter={()=>s&&setHov(s.id)} onMouseLeave={()=>setHov(null)} style={{
             display:"inline-block",padding:"1px 3px",margin:"1px",fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,
-            color:hi?"#fff":(s?s.color:C.dim),background:hi?s.color+"35":(s?s.color+"0a":"transparent"),
+            color:hi?(T.isDark?"#fff":"#000"):(s?s.color:T.dim),background:hi?s.color+"35":(s?s.color+"0a":"transparent"),
             borderRadius:3,cursor:s?"pointer":"default",borderBottom:`2px solid ${s?s.color+(hi?"90":"40"):"transparent"}`,transition:"all 0.12s",
           }}>{b}</span>;
         })}
@@ -600,8 +668,8 @@ function HexViewer({hex,sections}) {
           background:hov===s.id?s.color+"18":"transparent",border:`1px solid ${hov===s.id?s.color+"40":"transparent"}`,transition:"all 0.15s",
         }}>
           <span style={{width:10,height:10,borderRadius:3,background:s.color,flexShrink:0}}/>
-          <span style={{fontSize:11.5,color:hov===s.id?s.color:C.soft,fontWeight:600}}>{s.label}</span>
-          <span style={{fontSize:10,color:C.dim}}>({s.end-s.start}b)</span>
+          <span style={{fontSize:11.5,color:hov===s.id?s.color:T.soft,fontWeight:600}}>{s.label}</span>
+          <span style={{fontSize:10,color:T.dim}}>({s.end-s.start}b)</span>
         </div>)}
       </div>}
     </div>
@@ -611,29 +679,30 @@ function HexViewer({hex,sections}) {
 // ━━━ FIELD CARD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function FieldCard({f,open,toggle}) {
+  const T = useC();
   return (
-    <div style={{borderRadius:10,overflow:"hidden",border:`1px solid ${open?f.color+"50":C.border}`,background:open?C.cardHi:C.card,transition:"all 0.25s"}}>
+    <div style={{borderRadius:10,overflow:"hidden",border:`1px solid ${open?f.color+"50":T.border}`,background:open?T.cardHi:T.card,transition:"all 0.25s"}}>
       <div onClick={toggle} style={{display:"flex",alignItems:"center",gap:10,padding:"12px 16px",cursor:"pointer"}}>
         <Badge color={f.color} small>{f.key}</Badge>
         <span style={{fontSize:12.5,fontWeight:700,color:f.color,fontFamily:"'JetBrains Mono',monospace",flex:1}}>{f.name}</span>
-        {f.req&&<Badge color={C.red} small>REQUIRED</Badge>}
-        <span style={{fontSize:18,color:C.dim,transform:open?"rotate(180deg)":"rotate(0)",transition:"transform 0.25s"}}>▾</span>
+        {f.req&&<Badge color={T.red} small>REQUIRED</Badge>}
+        <span style={{fontSize:18,color:T.dim,transform:open?"rotate(180deg)":"rotate(0)",transition:"transform 0.25s"}}>▾</span>
       </div>
       {open&&<div style={{padding:"0 16px 18px",animation:"fadeIn 0.2s ease"}}>
-        <div style={{height:1,background:C.border,margin:"0 0 14px"}}/>
+        <div style={{height:1,background:T.border,margin:"0 0 14px"}}/>
         <div style={{display:"grid",gridTemplateColumns:"80px 1fr",gap:"8px 12px",marginBottom:14}}>
-          <span style={{fontSize:11,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.06em"}}>Key data</span>
-          <span style={{fontSize:12,color:C.orange}}>{f.kd}</span>
-          <span style={{fontSize:11,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.06em"}}>Value</span>
-          <span style={{fontSize:12,color:C.green}}>{f.vd}</span>
+          <span style={{fontSize:11,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.06em"}}>Key data</span>
+          <span style={{fontSize:12,color:T.orange}}>{f.kd}</span>
+          <span style={{fontSize:11,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.06em"}}>Value</span>
+          <span style={{fontSize:12,color:T.green}}>{f.vd}</span>
         </div>
-        <div style={{fontSize:13,color:C.soft,lineHeight:1.85,whiteSpace:"pre-line"}}>{f.desc}</div>
-        {f.ex&&<div style={{marginTop:14,padding:"12px 16px",borderRadius:8,background:"#060a10",border:`1px solid ${C.border}`}}>
-          <div style={{fontSize:10,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Example encoding</div>
+        <div style={{fontSize:13,color:T.soft,lineHeight:1.85}}><Fmt text={f.desc} codeBg={T.codeBg} accent={T.amber}/></div>
+        {f.ex&&<div style={{marginTop:14,padding:"12px 16px",borderRadius:8,background:T.codeBg,border:`1px solid ${T.border}`}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Example encoding</div>
           <div style={{display:"grid",gridTemplateColumns:"55px 1fr",gap:"4px 10px"}}>
-            <Mono color={C.dim} sz={11}>Key</Mono><Mono color={C.orange} sz={11}>{f.ex.k}</Mono>
-            <Mono color={C.dim} sz={11}>Value</Mono><Mono color={C.green} sz={11}>{f.ex.v}</Mono>
-            <Mono color={C.dim} sz={11}>Means</Mono><span style={{fontSize:11.5,color:C.cyan}}>{f.ex.m}</span>
+            <Mono color={T.dim} sz={11}>Key</Mono><Mono color={T.orange} sz={11}>{f.ex.k}</Mono>
+            <Mono color={T.dim} sz={11}>Value</Mono><Mono color={T.green} sz={11}>{f.ex.v}</Mono>
+            <Mono color={T.dim} sz={11}>Means</Mono><span style={{fontSize:11.5,color:T.cyan}}>{f.ex.m}</span>
           </div>
         </div>}
       </div>}
@@ -641,8 +710,9 @@ function FieldCard({f,open,toggle}) {
   );
 }
 function FieldTable({fields,title,icon}) {
+  const T = useC();
   const [open,setOpen] = useState(null);
-  return (<div><Head icon={icon} color={C.amber}>{title}</Head>
+  return (<div><Head icon={icon} color={T.amber}>{title}</Head>
     <div style={{display:"flex",flexDirection:"column",gap:6}}>
       {fields.map((f,i)=><FieldCard key={i} f={f} open={open===i} toggle={()=>setOpen(open===i?null:i)}/>)}
     </div></div>);
@@ -651,6 +721,7 @@ function FieldTable({fields,title,icon}) {
 // ━━━ ROLE FLOW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function RoleFlow() {
+  const T = useC();
   const [sel,setSel] = useState(null);
   const r = sel!==null ? ROLES[sel] : null;
   return (<div>
@@ -658,30 +729,31 @@ function RoleFlow() {
       {ROLES.map((ro,i)=>(<div key={ro.id} style={{display:"flex",alignItems:"center"}}>
         <div onClick={()=>setSel(sel===i?null:i)} style={{
           display:"flex",flexDirection:"column",alignItems:"center",gap:4,padding:"14px 14px",borderRadius:12,cursor:"pointer",
-          background:sel===i?ro.color+"14":C.surface,border:`2px solid ${sel===i?ro.color:C.border}`,
+          background:sel===i?ro.color+"14":T.surface,border:`2px solid ${sel===i?ro.color:T.border}`,
           transition:"all 0.25s",minWidth:84,transform:sel===i?"translateY(-4px) scale(1.04)":"none",
           boxShadow:sel===i?`0 8px 24px ${ro.color}15`:"none",
         }}>
           <span style={{fontSize:24}}>{ro.icon}</span>
           <span style={{fontSize:11.5,fontWeight:800,color:ro.color}}>{ro.name}</span>
+          {ro.v2&&<span style={{fontSize:8,fontWeight:800,color:T.cyan,background:T.cyan+"15",padding:"1px 5px",borderRadius:4,letterSpacing:"0.04em"}}>v2</span>}
         </div>
-        {i<ROLES.length-1&&<svg width="24" height="14" viewBox="0 0 24 14" style={{flexShrink:0,margin:"0 2px"}}><path d="M1 7 L17 7 M13 2 L19 7 L13 12" stroke={C.dim} strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+        {i<ROLES.length-1&&<svg width="24" height="14" viewBox="0 0 24 14" style={{flexShrink:0,margin:"0 2px"}}><path d="M1 7 L17 7 M13 2 L19 7 L13 12" stroke={T.dim} strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
       </div>))}
     </div>
-    {r&&<div style={{marginTop:8,padding:20,borderRadius:12,background:C.cardHi,border:`1px solid ${r.color}30`,animation:"fadeIn 0.2s ease"}}>
+    {r&&<div style={{marginTop:8,padding:20,borderRadius:12,background:T.cardHi,border:`1px solid ${r.color}30`,animation:"fadeIn 0.2s ease"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
         <span style={{fontSize:28}}>{r.icon}</span>
-        <div><div style={{fontSize:16,fontWeight:800,color:r.color}}>{r.name}</div><div style={{fontSize:12,color:C.dim}}>{r.short}</div></div>
+        <div><div style={{fontSize:16,fontWeight:800,color:r.color}}>{r.name}</div><div style={{fontSize:12,color:T.dim}}>{r.short}</div></div>
       </div>
-      <div style={{fontSize:13,color:C.soft,lineHeight:1.85,whiteSpace:"pre-line"}}>{r.full}</div>
+      <div style={{fontSize:13,color:T.soft,lineHeight:1.85}}><Fmt text={r.full} codeBg={T.codeBg} accent={r.color}/></div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:16}}>
-        <div style={{padding:"10px 14px",borderRadius:8,background:C.green+"0a",border:`1px solid ${C.green}20`}}>
-          <div style={{fontSize:10,fontWeight:700,color:C.green,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Produces</div>
-          <div style={{fontSize:12,color:C.soft}}>{r.produces}</div>
+        <div style={{padding:"10px 14px",borderRadius:8,background:T.green+"0a",border:`1px solid ${T.green}20`}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.green,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Produces</div>
+          <div style={{fontSize:12,color:T.soft}}>{r.produces}</div>
         </div>
-        <div style={{padding:"10px 14px",borderRadius:8,background:C.blue+"0a",border:`1px solid ${C.blue}20`}}>
-          <div style={{fontSize:10,fontWeight:700,color:C.blue,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Consumes</div>
-          <div style={{fontSize:12,color:C.soft}}>{r.consumes}</div>
+        <div style={{padding:"10px 14px",borderRadius:8,background:T.blue+"0a",border:`1px solid ${T.blue}20`}}>
+          <div style={{fontSize:10,fontWeight:700,color:T.blue,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>Consumes</div>
+          <div style={{fontSize:12,color:T.soft}}>{r.consumes}</div>
         </div>
       </div>
     </div>}
@@ -691,6 +763,7 @@ function RoleFlow() {
 // ━━━ SCENARIO WALKTHROUGH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function Scenarios() {
+  const T = useC();
   const [si,setSi] = useState(0);
   const [stage,setStage] = useState(0);
   const s = SCENARIOS[si];
@@ -699,134 +772,79 @@ function Scenarios() {
   return (<div style={{display:"flex",flexDirection:"column",gap:20}}>
     <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
       {SCENARIOS.map((sc,i)=>(<button key={sc.id} onClick={()=>setSi(i)} style={{
-        padding:"10px 16px",borderRadius:10,border:`2px solid ${si===i?sc.color:C.border}`,
-        background:si===i?sc.color+"12":C.surface,cursor:"pointer",display:"flex",alignItems:"center",gap:8,transition:"all 0.2s",fontFamily:"inherit",
-      }}><span style={{fontSize:20}}>{sc.emoji}</span><span style={{fontSize:13,fontWeight:700,color:si===i?sc.color:C.dim}}>{sc.title}</span></button>))}
+        padding:"10px 16px",borderRadius:10,border:`2px solid ${si===i?sc.color:T.border}`,
+        background:si===i?sc.color+"12":T.surface,cursor:"pointer",display:"flex",alignItems:"center",gap:8,transition:"all 0.2s",fontFamily:"inherit",
+      }}><span style={{fontSize:20}}>{sc.emoji}</span><span style={{fontSize:13,fontWeight:700,color:si===i?sc.color:T.dim}}>{sc.title}</span></button>))}
     </div>
     <Card style={{background:s.color+"06",borderColor:s.color+"25"}}>
       <div style={{fontSize:15,fontWeight:800,color:s.color,marginBottom:8}}>{s.emoji} {s.title}</div>
-      <p style={{margin:"0 0 16px",fontSize:13,color:C.soft,lineHeight:1.85}}>{s.summary}</p>
+      <p style={{margin:"0 0 16px",fontSize:13,color:T.soft,lineHeight:1.85}}>{s.summary}</p>
       <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:12,alignItems:"start"}}>
         <div>
-          <div style={{fontSize:10,fontWeight:700,color:C.orange,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Inputs</div>
-          {s.inputs.map((inp,i)=>(<div key={i} style={{padding:"10px 12px",borderRadius:8,marginBottom:4,background:"#060a10",border:`1px solid ${C.border}`}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.orange,marginBottom:4}}>{inp.label}</div>
-            <Mono sz={10} color={C.dim}>{inp.txid.slice(0,16)}...:{inp.vout}</Mono>
+          <div style={{fontSize:10,fontWeight:700,color:T.orange,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Inputs</div>
+          {s.inputs.map((inp,i)=>(<div key={i} style={{padding:"10px 12px",borderRadius:8,marginBottom:4,background:T.codeBg,border:`1px solid ${T.border}`}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.orange,marginBottom:4}}>{inp.label}</div>
+            <Mono sz={10} color={T.dim}>{inp.txid.slice(0,16)}...:{inp.vout}</Mono>
             <div style={{display:"flex",gap:6,marginTop:4,flexWrap:"wrap"}}>
-              <Badge color={C.amber} small>{inp.amount.toLocaleString()} sats</Badge>
-              <Badge color={C.purple} small>{inp.type}</Badge>
-              {inp.path&&<Badge color={C.blue} small>{inp.path}</Badge>}
+              <Badge color={T.amber} small>{inp.amount.toLocaleString()} sats</Badge>
+              <Badge color={T.purple} small>{inp.type}</Badge>
+              {inp.path&&<Badge color={T.blue} small>{inp.path}</Badge>}
             </div>
           </div>))}
         </div>
         <div style={{display:"flex",alignItems:"center",paddingTop:30}}>
-          <svg width="36" height="20" viewBox="0 0 36 20"><path d="M2 10 L28 10 M24 4 L30 10 L24 16" stroke={C.dim} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
+          <svg width="36" height="20" viewBox="0 0 36 20"><path d="M2 10 L28 10 M24 4 L30 10 L24 16" stroke={T.dim} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
         </div>
         <div>
-          <div style={{fontSize:10,fontWeight:700,color:C.blue,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Outputs</div>
-          {s.outputs.map((out,i)=>(<div key={i} style={{padding:"10px 12px",borderRadius:8,marginBottom:4,background:"#060a10",border:`1px solid ${C.border}`}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.blue,marginBottom:4}}>{out.label}</div>
-            <Mono sz={10} color={C.dim}>{out.addr.slice(0,24)}...</Mono>
-            <div style={{marginTop:4}}><Badge color={C.green} small>{out.amount.toLocaleString()} sats</Badge></div>
+          <div style={{fontSize:10,fontWeight:700,color:T.blue,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Outputs</div>
+          {s.outputs.map((out,i)=>(<div key={i} style={{padding:"10px 12px",borderRadius:8,marginBottom:4,background:T.codeBg,border:`1px solid ${T.border}`}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.blue,marginBottom:4}}>{out.label}</div>
+            <Mono sz={10} color={T.dim}>{out.addr.slice(0,24)}...</Mono>
+            <div style={{marginTop:4}}><Badge color={T.green} small>{out.amount.toLocaleString()} sats</Badge></div>
           </div>))}
-          <div style={{marginTop:4,textAlign:"right"}}><Badge color={C.red} small>Fee: {s.fee} sats</Badge></div>
+          <div style={{marginTop:4,textAlign:"right"}}><Badge color={T.red} small>Fee: {s.fee} sats</Badge></div>
         </div>
       </div>
     </Card>
     <Card>
-      <div style={{fontSize:10,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:12}}>Step-by-step PSBT lifecycle — click any stage</div>
+      <div style={{fontSize:10,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:12}}>Step-by-step PSBT lifecycle — click any stage</div>
       <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}}>
         {s.stages.map((stg,i)=>(<button key={i} onClick={()=>setStage(i)} style={{
-          padding:"7px 14px",borderRadius:8,border:`1.5px solid ${stage===i?stg.color:C.border}`,
-          background:stage===i?stg.color+"15":"transparent",color:stage===i?stg.color:C.dim,
+          padding:"7px 14px",borderRadius:8,border:`1.5px solid ${stage===i?stg.color:T.border}`,
+          background:stage===i?stg.color+"15":"transparent",color:stage===i?stg.color:T.dim,
           fontWeight:700,fontSize:12,cursor:"pointer",whiteSpace:"nowrap",transition:"all 0.2s",fontFamily:"inherit",
         }}>{i+1}. {stg.role}</button>))}
       </div>
       <div style={{padding:20,borderRadius:10,background:st.color+"06",border:`1.5px solid ${st.color}30`,minHeight:200}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
           <div style={{width:32,height:32,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:st.color+"20",fontSize:14,fontWeight:900,color:st.color}}>{stage+1}</div>
-          <div><div style={{fontSize:15,fontWeight:800,color:st.color}}>{st.role}</div><div style={{fontSize:11,color:C.dim}}>Stage {stage+1} of {s.stages.length}</div></div>
+          <div><div style={{fontSize:15,fontWeight:800,color:st.color}}>{st.role}</div><div style={{fontSize:11,color:T.dim}}>Stage {stage+1} of {s.stages.length}</div></div>
         </div>
-        <div style={{fontSize:13,color:C.soft,lineHeight:1.9,whiteSpace:"pre-line"}}>{st.text}</div>
+        <div style={{fontSize:13,color:T.soft,lineHeight:1.9}}><Fmt text={st.text} codeBg={T.codeBg} accent={st.color}/></div>
         {st.fields.length>0&&<div style={{marginTop:14}}>
-          <div style={{fontSize:10,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>PSBT fields touched</div>
+          <div style={{fontSize:10,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>PSBT fields touched</div>
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>{st.fields.map((f,i)=><Badge key={i} color={st.color}>{f}</Badge>)}</div>
         </div>}
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:14}}>
         <button onClick={()=>setStage(Math.max(0,stage-1))} disabled={stage===0} style={{
           padding:"8px 18px",borderRadius:8,fontWeight:700,fontSize:12,cursor:stage===0?"default":"pointer",
-          background:"transparent",border:`1.5px solid ${stage===0?C.border:C.dim}`,color:stage===0?C.dim:C.text,fontFamily:"inherit",
+          background:"transparent",border:`1.5px solid ${stage===0?T.border:T.dim}`,color:stage===0?T.dim:T.text,fontFamily:"inherit",
         }}>← Previous</button>
         <button onClick={()=>setStage(Math.min(s.stages.length-1,stage+1))} disabled={stage===s.stages.length-1} style={{
           padding:"8px 18px",borderRadius:8,fontWeight:700,fontSize:12,
           cursor:stage===s.stages.length-1?"default":"pointer",
-          background:stage===s.stages.length-1?C.border:st.color,border:"none",color:stage===s.stages.length-1?C.dim:"#000",fontFamily:"inherit",
+          background:stage===s.stages.length-1?T.border:st.color,border:"none",color:stage===s.stages.length-1?T.dim:"#000",fontFamily:"inherit",
         }}>Next Stage →</button>
       </div>
     </Card>
   </div>);
 }
 
-// ━━━ STRUCTURE VISUALIZER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-function Structure({version}) {
-  const [sel,setSel] = useState(null);
-  const L = version===2 ? [
-    {id:"magic",label:"Magic Bytes",bytes:"70 73 62 74 ff",d:"ASCII \"psbt\" + 0xFF separator. Every PSBT starts with these 5 bytes. 0xFF can't be confused with a valid compact-size key-length, so it unambiguously marks the start of data.",color:C.red,w:1},
-    {id:"global",label:"Global Map (v2)",d:"PSBT_GLOBAL_VERSION (=2), TX_VERSION, INPUT_COUNT, OUTPUT_COUNT, optionally FALLBACK_LOCKTIME and TX_MODIFIABLE. UNSIGNED_TX is NOT present \u2014 tx data is decomposed into per-input and per-output fields.",color:C.amber,w:1},
-    {id:"sep0",label:"0x00 Separator",bytes:"00",d:"A single zero byte terminates the global map. The parser reads key-value pairs in a loop; when it encounters a key-length of 0x00, there's no valid key that short, so it knows the map is done. It then advances to the first input map. This same 0x00 byte terminates EVERY map in the PSBT \u2014 it's the universal \"end of map\" signal. Without separators, the parser couldn't know where one map ends and the next begins, since maps have variable numbers of KV pairs.",color:C.dim,w:1},
-    {id:"in0",label:"Input 0 Map",d:"PREVIOUS_TXID + OUTPUT_INDEX (required), plus SEQUENCE, WITNESS_UTXO, BIP32_DERIVATION, scripts, sigs, locktime fields.",color:C.green,w:.48},
-    {id:"sep1",label:"0x00 Separator",bytes:"00",d:"Terminates Input 0 Map. Parser now expects the next input map (Input 1) if more inputs remain, or the first output map if all inputs are done. The parser knows how many inputs to expect from GLOBAL_INPUT_COUNT.",color:C.dim,w:.48},
-    {id:"inN",label:"Input N Map",d:"Same structure. Count must equal GLOBAL_INPUT_COUNT. Each input map is terminated by its own 0x00 separator. Appendable during construction.",color:C.green,w:.48},
-    {id:"sepN",label:"0x00 Separator",bytes:"00",d:"Terminates the last input map. Parser transitions from input maps to output maps.",color:C.dim,w:.48},
-    {id:"out0",label:"Output 0 Map",d:"AMOUNT + SCRIPT (required), plus optional REDEEM_SCRIPT, WITNESS_SCRIPT, BIP32_DERIVATION.",color:C.blue,w:.48},
-    {id:"sep2",label:"0x00 Separator",bytes:"00",d:"Terminates Output 0 Map. Next output follows, or PSBT ends after the last output's separator.",color:C.dim,w:.48},
-    {id:"outN",label:"Output N Map",d:"Same. Count must match GLOBAL_OUTPUT_COUNT. The 0x00 after the final output map is the last byte of the PSBT.",color:C.blue,w:.48},
-    {id:"sep3",label:"0x00 (EOF)",bytes:"00",d:"Final separator. After this byte, the PSBT is complete. There is no explicit \"end of PSBT\" marker \u2014 the last output map's separator IS the end. A parser that has consumed all expected input and output maps stops here.",color:C.dim,w:.48},
-  ] : [
-    {id:"magic",label:"Magic Bytes",bytes:"70 73 62 74 ff",d:"ASCII \"psbt\" + 0xFF separator. Every valid PSBT begins with these 5 bytes for format identification.",color:C.red,w:1},
-    {id:"global",label:"Global Map (v0)",d:"Key entry: PSBT_GLOBAL_UNSIGNED_TX \u2014 complete unsigned tx with empty scriptSigs, no witness. Also XPUB entries and VERSION. This is where the tx structure lives in v0.",color:C.amber,w:1},
-    {id:"sep0",label:"0x00 Separator",bytes:"00",d:"Terminates the global map. The parser reads KV pairs in a loop: read compact-size key-length, if 0x00 \u2192 map is done, advance. This is the ONLY way to know a map has ended \u2014 there's no count of KV pairs. The 0x00 byte works because a valid key must have at least 1 byte (the type byte), so key-length=0 is unambiguous.\n\nAfter this separator, the parser expects Input 0 Map. In v0, the number of input maps equals the number of inputs in the unsigned tx.",color:C.dim,w:1},
-    {id:"in0",label:"Input 0 Map",d:"WITNESS_UTXO or NON_WITNESS_UTXO, BIP32_DERIVATION, then PARTIAL_SIG after signing or FINAL_SCRIPTSIG/FINAL_SCRIPTWITNESS after finalization. Index = position in unsigned tx.",color:C.green,w:.48},
-    {id:"sep1",label:"0x00 Separator",bytes:"00",d:"Terminates Input 0 Map. Parser moves to Input 1 (or Output 0 if only 1 input). Critical: even an empty input map (no KV pairs) still needs this 0x00 \u2014 it's just a bare separator byte.",color:C.dim,w:.48},
-    {id:"inN",label:"Input N Map",d:"One per input in the unsigned tx. Even empty ones need their own 0x00 separator \u2014 the positional correspondence with unsigned tx inputs must be preserved.",color:C.green,w:.48},
-    {id:"sepN",label:"0x00 Separator",bytes:"00",d:"Terminates the last input map. Parser transitions to output maps.",color:C.dim,w:.48},
-    {id:"out0",label:"Output 0 Map",d:"Often empty for payment outputs. Change outputs get BIP32_DERIVATION. May have REDEEM_SCRIPT or WITNESS_SCRIPT.",color:C.blue,w:.48},
-    {id:"sep2",label:"0x00 Separator",bytes:"00",d:"Terminates Output 0 Map.",color:C.dim,w:.48},
-    {id:"outN",label:"Output N Map",d:"One per output. Count must match unsigned tx outputs. Even empty output maps need the 0x00 separator.",color:C.blue,w:.48},
-    {id:"sep3",label:"0x00 (EOF)",bytes:"00",d:"Final byte of the PSBT. The separator after the last output map signals completion. A v0 parser verifies: global map count = 1, input map count = unsigned tx input count, output map count = unsigned tx output count.",color:C.dim,w:.48},
-  ];
-  return (<div style={{display:"flex",flexDirection:"column",gap:6}}>
-    {L.map((l,i) => {
-      const half = l.w<1;
-      if(half && i>0 && L[i-1].w<1) return null;
-      if(half) {
-        const pair=[l,L[i+1]].filter(Boolean);
-        return <div key={i} style={{display:"flex",gap:6}}>{pair.map(p=>(
-          <div key={p.id} onClick={()=>setSel(sel===p.id?null:p.id)} style={{
-            flex:1,padding:"14px 16px",borderRadius:10,cursor:"pointer",
-            background:sel===p.id?p.color+"10":C.surface,border:`2px solid ${sel===p.id?p.color:C.border}`,transition:"all 0.2s",
-          }}><div style={{fontSize:12.5,fontWeight:800,color:p.color}}>{p.label}</div>
-            {sel===p.id&&<p style={{margin:"10px 0 0",fontSize:12.5,color:C.soft,lineHeight:1.8}}>{p.d}</p>}
-          </div>))}</div>;
-      }
-      return (<div key={i} onClick={()=>setSel(sel===l.id?null:l.id)} style={{
-        padding:"14px 16px",borderRadius:10,cursor:"pointer",
-        background:sel===l.id?l.color+"10":C.surface,border:`2px solid ${sel===l.id?l.color:C.border}`,transition:"all 0.2s",
-      }}><div style={{display:"flex",alignItems:"center",gap:10}}>
-          <span style={{fontSize:12.5,fontWeight:800,color:l.color}}>{l.label}</span>
-          {l.bytes&&<Mono color={C.dim} sz={11}>{l.bytes}</Mono>}
-        </div>
-        {sel===l.id&&<p style={{margin:"10px 0 0",fontSize:12.5,color:C.soft,lineHeight:1.8}}>{l.d}</p>}
-      </div>);
-    })}
-  </div>);
-}
-
 // ━━━ KV ENCODING EXPLAINER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function KVEncoding() {
+  const T = useC();
   const [ex,setEx] = useState(0);
   const EX = [
     {t:"Unsigned TX (Global 0x00)",color:C.amber,rows:[
@@ -860,36 +878,36 @@ function KVEncoding() {
   ];
   const e = EX[ex];
   return (<div>
-    <Head icon="A̲" color={C.purple}>Key-Value Encoding</Head>
-    <p style={{fontSize:13,color:C.soft,lineHeight:1.85,margin:"0 0 16px"}}>
-      Every PSBT map is a sequence of key-value pairs: compact-size key length, key bytes (type + optional data), compact-size value length, value bytes. A bare <strong style={{color:C.amber}}>0x00</strong> byte ends each map — it acts as the separator between maps. The parser reads in a loop: peek at key-length, if it's 0x00 the map is done, otherwise read the full KV pair. This is the only delimiter — there is no pair count, no map length header. The entire PSBT is: magic, global map, 0x00, input maps (each followed by 0x00), output maps (each followed by 0x00).
+    <Head icon="A̲" color={T.purple}>Key-Value Encoding</Head>
+    <p style={{fontSize:13,color:T.soft,lineHeight:1.85,margin:"0 0 16px"}}>
+      Every PSBT map is a sequence of key-value pairs: compact-size key length, key bytes (type + optional data), compact-size value length, value bytes. A bare <strong style={{color:T.amber}}>0x00</strong> byte ends each map — it acts as the separator between maps. The parser reads in a loop: peek at key-length, if it's 0x00 the map is done, otherwise read the full KV pair. This is the only delimiter — there is no pair count, no map length header. The entire PSBT is: magic, global map, 0x00, input maps (each followed by 0x00), output maps (each followed by 0x00).
     </p>
-    <div style={{display:"flex",gap:6,alignItems:"stretch",justifyContent:"center",padding:"20px 14px",background:"#050910",borderRadius:12,border:`1px solid ${C.border}`,marginBottom:16,flexWrap:"wrap"}}>
-      {[{l:"key-len",s:"compact size",c:C.purple},{l:"key-type",s:"1 byte",c:C.amber},{l:"key-data",s:"0+ bytes",c:C.orange},{l:"value-len",s:"compact size",c:C.purple},{l:"value-data",s:"0+ bytes",c:C.green}].map((seg,i)=>(
+    <div style={{display:"flex",gap:6,alignItems:"stretch",justifyContent:"center",padding:"20px 14px",background:T.codeBg,borderRadius:12,border:`1px solid ${T.border}`,marginBottom:16,flexWrap:"wrap"}}>
+      {[{l:"key-len",s:"compact size",c:T.purple},{l:"key-type",s:"1 byte",c:T.amber},{l:"key-data",s:"0+ bytes",c:T.orange},{l:"value-len",s:"compact size",c:T.purple},{l:"value-data",s:"0+ bytes",c:T.green}].map((seg,i)=>(
         <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
           <div style={{padding:"10px 14px",borderRadius:8,background:seg.c+"12",border:`2px solid ${seg.c}50`,textAlign:"center",minWidth:80}}>
             <div style={{fontSize:12,fontWeight:800,color:seg.c,fontFamily:"'JetBrains Mono',monospace"}}>{seg.l}</div>
-            <div style={{fontSize:10,color:C.dim,marginTop:2}}>{seg.s}</div>
-          </div>{i<4&&<span style={{color:C.dim,fontSize:14,fontWeight:700}}>+</span>}
+            <div style={{fontSize:10,color:T.dim,marginTop:2}}>{seg.s}</div>
+          </div>{i<4&&<span style={{color:T.dim,fontSize:14,fontWeight:700}}>+</span>}
         </div>))}
     </div>
-    <InfoBox color={C.purple} icon="•">
-      <strong style={{color:C.purple}}>Compact-size:</strong> 0-252 → 1 byte. 253-65535 → 0xFD + 2B LE. 65536-4B → 0xFE + 4B LE. Larger → 0xFF + 8B LE. The magic 0xFF at PSBT start can't be a valid compact-size, so it unambiguously marks the boundary.
+    <InfoBox color={T.purple} icon="•">
+      <strong style={{color:T.purple}}>Compact-size:</strong> 0-252 → 1 byte. 253-65535 → 0xFD + 2B LE. 65536-4B → 0xFE + 4B LE. Larger → 0xFF + 8B LE. The magic 0xFF at PSBT start can't be a valid compact-size, so it unambiguously marks the boundary.
     </InfoBox>
     <div style={{marginTop:20,display:"flex",gap:6,flexWrap:"wrap"}}>
       {EX.map((eg,i)=>(<button key={i} onClick={()=>setEx(i)} style={{
-        padding:"8px 14px",borderRadius:8,border:`1.5px solid ${ex===i?eg.color:C.border}`,
-        background:ex===i?eg.color+"12":"transparent",color:ex===i?eg.color:C.dim,
+        padding:"8px 14px",borderRadius:8,border:`1.5px solid ${ex===i?eg.color:T.border}`,
+        background:ex===i?eg.color+"12":"transparent",color:ex===i?eg.color:T.dim,
         fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit",transition:"all 0.2s",
       }}>{eg.t}</button>))}
     </div>
-    <div style={{marginTop:12,padding:20,borderRadius:12,background:"#060a10",border:`1px solid ${e.color}30`}}>
+    <div style={{marginTop:12,padding:20,borderRadius:12,background:T.codeBg,border:`1px solid ${e.color}30`}}>
       <div style={{fontSize:14,fontWeight:800,color:e.color,marginBottom:14}}>{e.t}</div>
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {e.rows.map((row,i)=>(<div key={i} style={{display:"grid",gridTemplateColumns:"100px 180px 1fr",gap:10,alignItems:"baseline",padding:"8px 12px",borderRadius:8,background:row.c+"06",border:`1px solid ${row.c}15`}}>
           <span style={{fontSize:11,fontWeight:700,color:row.c}}>{row.l}</span>
           <Mono sz={11} color={row.c}>{row.v}</Mono>
-          <span style={{fontSize:12,color:C.soft,lineHeight:1.6}}>{row.m}</span>
+          <span style={{fontSize:12,color:T.soft,lineHeight:1.6}}>{row.m}</span>
         </div>))}
       </div>
     </div>
@@ -899,25 +917,26 @@ function KVEncoding() {
 // ━━━ COMPARISON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function Compare() {
+  const T = useC();
   const [exp,setExp] = useState(null);
   return (<div style={{display:"flex",flexDirection:"column",gap:8}}>
     {DIFFS.map((d,i)=>(<div key={i} onClick={()=>setExp(exp===i?null:i)} style={{
       borderRadius:12,overflow:"hidden",cursor:"pointer",
-      border:`1.5px solid ${exp===i?d.color+"50":C.border}`,background:exp===i?C.cardHi:C.card,transition:"all 0.25s",
+      border:`1.5px solid ${exp===i?d.color+"50":T.border}`,background:exp===i?T.cardHi:T.card,transition:"all 0.25s",
     }}>
       <div style={{display:"grid",gridTemplateColumns:"120px 1fr 1fr",gap:14,padding:"14px 18px",alignItems:"start"}}>
         <div style={{fontSize:13,fontWeight:800,color:d.color}}>{d.a}</div>
-        <div style={{fontSize:12,color:C.dim,lineHeight:1.7}}>
-          <span style={{fontSize:10,fontWeight:700,color:C.amber,display:"block",marginBottom:3}}>BIP-174 (v0)</span>{d.v0}
+        <div style={{fontSize:12,color:T.dim,lineHeight:1.7}}>
+          <span style={{fontSize:10,fontWeight:700,color:T.amber,display:"block",marginBottom:3}}>BIP-174 (v0)</span>{d.v0}
         </div>
-        <div style={{fontSize:12,color:C.soft,lineHeight:1.7}}>
-          <span style={{fontSize:10,fontWeight:700,color:C.cyan,display:"block",marginBottom:3}}>BIP-370 (v2)</span>{d.v2}
+        <div style={{fontSize:12,color:T.soft,lineHeight:1.7}}>
+          <span style={{fontSize:10,fontWeight:700,color:T.cyan,display:"block",marginBottom:3}}>BIP-370 (v2)</span>{d.v2}
         </div>
       </div>
       {exp===i&&<div style={{padding:"0 18px 16px",animation:"fadeIn 0.2s ease"}}>
         <div style={{padding:"12px 16px",borderRadius:8,background:d.color+"08",border:`1px solid ${d.color}20`}}>
           <span style={{fontSize:10,fontWeight:700,color:d.color,textTransform:"uppercase",letterSpacing:"0.06em"}}>Why the change?</span>
-          <p style={{margin:"6px 0 0",fontSize:12.5,color:C.soft,lineHeight:1.75}}>{d.why}</p>
+          <p style={{margin:"6px 0 0",fontSize:12.5,color:T.soft,lineHeight:1.75}}>{d.why}</p>
         </div>
       </div>}
     </div>))}
@@ -927,32 +946,33 @@ function Compare() {
 // ━━━ UTXO VISUALIZER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function UTXOVisualizer({utxos,outputs}) {
+  const T = useC();
   if(!utxos||(!utxos.length&&!outputs?.length)) return null;
   return (<div style={{marginTop:16}}>
-    <div style={{fontSize:11,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>Transaction UTXO Map</div>
+    <div style={{fontSize:11,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>Transaction UTXO Map</div>
     <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:12,alignItems:"start"}}>
       <div>
-        <div style={{fontSize:10,fontWeight:700,color:C.orange,marginBottom:6}}>INPUTS</div>
-        {utxos.length===0?<div style={{padding:10,borderRadius:6,background:"#060a10",border:`1px solid ${C.border}`,fontSize:11,color:C.dim}}>No inputs</div>:
-        utxos.map((u,i)=>(<div key={i} style={{padding:"8px 10px",borderRadius:6,marginBottom:4,background:"#060a10",border:`1px solid ${C.border}`}}>
+        <div style={{fontSize:10,fontWeight:700,color:T.orange,marginBottom:6}}>INPUTS</div>
+        {utxos.length===0?<div style={{padding:10,borderRadius:6,background:T.codeBg,border:`1px solid ${T.border}`,fontSize:11,color:T.dim}}>No inputs</div>:
+        utxos.map((u,i)=>(<div key={i} style={{padding:"8px 10px",borderRadius:6,marginBottom:4,background:T.codeBg,border:`1px solid ${T.border}`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-            <span style={{fontSize:11,fontWeight:700,color:C.orange}}>{u.label}</span>
-            <Badge color={u.status?.includes("✓")?C.green:u.status?.includes("Unsigned")?C.red:C.amber} small>{u.status||"?"}</Badge>
+            <span style={{fontSize:11,fontWeight:700,color:T.orange}}>{u.label}</span>
+            <Badge color={u.status?.includes("✓")?T.green:u.status?.includes("Unsigned")?T.red:T.amber} small>{u.status||"?"}</Badge>
           </div>
-          <Mono sz={10} color={C.dim}>{u.txid}:{u.vout}</Mono>
-          <div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}><Badge color={C.amber} small>{u.amount}</Badge><Badge color={C.purple} small>{u.type}</Badge></div>
+          <Mono sz={10} color={T.dim}>{u.txid}:{u.vout}</Mono>
+          <div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}><Badge color={T.amber} small>{u.amount}</Badge><Badge color={T.purple} small>{u.type}</Badge></div>
         </div>))}
       </div>
       <div style={{display:"flex",alignItems:"center",paddingTop:20}}>
-        <svg width="32" height="16" viewBox="0 0 32 16"><path d="M2 8L24 8M20 3L26 8L20 13" stroke={C.dim} strokeWidth="1.5" fill="none" strokeLinecap="round"/></svg>
+        <svg width="32" height="16" viewBox="0 0 32 16"><path d="M2 8L24 8M20 3L26 8L20 13" stroke={T.dim} strokeWidth="1.5" fill="none" strokeLinecap="round"/></svg>
       </div>
       <div>
-        <div style={{fontSize:10,fontWeight:700,color:C.blue,marginBottom:6}}>OUTPUTS</div>
-        {(!outputs||!outputs.length)?<div style={{padding:10,borderRadius:6,background:"#060a10",border:`1px solid ${C.border}`,fontSize:11,color:C.dim}}>No outputs</div>:
-        outputs.map((o,i)=>(<div key={i} style={{padding:"8px 10px",borderRadius:6,marginBottom:4,background:"#060a10",border:`1px solid ${C.border}`}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.blue,marginBottom:3}}>{o.label}</div>
-          <Mono sz={10} color={C.dim}>{o.addr}</Mono>
-          <div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}><Badge color={C.green} small>{o.amount}</Badge><Badge color={C.blue} small>{o.type}</Badge></div>
+        <div style={{fontSize:10,fontWeight:700,color:T.blue,marginBottom:6}}>OUTPUTS</div>
+        {(!outputs||!outputs.length)?<div style={{padding:10,borderRadius:6,background:T.codeBg,border:`1px solid ${T.border}`,fontSize:11,color:T.dim}}>No outputs</div>:
+        outputs.map((o,i)=>(<div key={i} style={{padding:"8px 10px",borderRadius:6,marginBottom:4,background:T.codeBg,border:`1px solid ${T.border}`}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.blue,marginBottom:3}}>{o.label}</div>
+          <Mono sz={10} color={T.dim}>{o.addr}</Mono>
+          <div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}><Badge color={T.green} small>{o.amount}</Badge><Badge color={T.blue} small>{o.type}</Badge></div>
         </div>))}
       </div>
     </div>
@@ -962,6 +982,7 @@ function UTXOVisualizer({utxos,outputs}) {
 // ━━━ SERIALIZATION FLOWS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function SerializationFlows() {
+  const T = useC();
   const [flowId,setFlowId] = useState("p2wpkh");
   const [step,setStep] = useState(0);
   const flow = FLOWS[flowId];
@@ -969,20 +990,20 @@ function SerializationFlows() {
   const s = flow.steps[si];
   const changeFlow = (id) => { setFlowId(id); setStep(0); };
   return (<div>
-    <Head icon="◇" color={C.amber} sub="Select a script type, then step through byte-level serialization at each PSBT lifecycle stage.">Serialization Flows</Head>
+    <Head icon="◇" color={T.amber} sub="Select a script type, then step through byte-level serialization at each PSBT lifecycle stage.">Serialization Flows</Head>
     <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}}>
       {Object.entries(FLOWS).map(([id,fl])=>(<button key={id} onClick={()=>changeFlow(id)} style={{
-        padding:"9px 14px",borderRadius:8,border:`2px solid ${flowId===id?fl.color:C.border}`,
-        background:flowId===id?fl.color+"12":C.surface,color:flowId===id?fl.color:C.dim,
+        padding:"9px 14px",borderRadius:8,border:`2px solid ${flowId===id?fl.color:T.border}`,
+        background:flowId===id?fl.color+"12":T.surface,color:flowId===id?fl.color:T.dim,
         fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit",transition:"all 0.2s",
         display:"flex",alignItems:"center",gap:6,
       }}><span style={{fontSize:15}}>{fl.emoji}</span>{fl.title}</button>))}
     </div>
-    <div style={{padding:"10px 14px",borderRadius:8,background:flow.color+"06",border:`1px solid ${flow.color}20`,marginBottom:14,fontSize:12,color:C.soft,lineHeight:1.6}}>{flow.desc}</div>
+    <div style={{padding:"10px 14px",borderRadius:8,background:flow.color+"06",border:`1px solid ${flow.color}20`,marginBottom:14,fontSize:12,color:T.soft,lineHeight:1.6}}>{flow.desc}</div>
     <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:16}}>
       {flow.steps.map((st,i)=>(<button key={i} onClick={()=>setStep(i)} style={{
-        padding:"7px 12px",borderRadius:8,border:`1.5px solid ${si===i?st.color:C.border}`,
-        background:si===i?st.color+"15":"transparent",color:si===i?st.color:C.dim,
+        padding:"7px 12px",borderRadius:8,border:`1.5px solid ${si===i?st.color:T.border}`,
+        background:si===i?st.color+"15":"transparent",color:si===i?st.color:T.dim,
         fontWeight:700,fontSize:11,cursor:"pointer",transition:"all 0.2s",fontFamily:"inherit",
       }}>{i+1}. {st.title}</button>))}
     </div>
@@ -991,19 +1012,19 @@ function SerializationFlows() {
         <div style={{width:28,height:28,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",background:s.color+"20",fontSize:13,fontWeight:900,color:s.color}}>{si+1}</div>
         <div style={{fontSize:15,fontWeight:800,color:s.color}}>{s.title}</div>
       </div>
-      <p style={{margin:"0 0 14px",fontSize:13,color:C.soft,lineHeight:1.85}}>{s.desc}</p>
+      <p style={{margin:"0 0 14px",fontSize:13,color:T.soft,lineHeight:1.85}}>{s.desc}</p>
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
         {s.fields.map((f,i)=>(<div key={i} style={{display:"grid",gridTemplateColumns:"110px minmax(80px,160px) 1fr",gap:8,alignItems:"baseline",padding:"8px 12px",borderRadius:8,background:f.color+"06",border:`1px solid ${f.color}15`}}>
           <span style={{fontSize:11,fontWeight:700,color:f.color}}>{f.label}</span>
           <Mono sz={10} color={f.color}>{f.hex.length>32?f.hex.slice(0,28)+"...":f.hex}</Mono>
-          <span style={{fontSize:11.5,color:C.soft,lineHeight:1.5}}>{f.desc}</span>
+          <span style={{fontSize:11.5,color:T.soft,lineHeight:1.5}}>{f.desc}</span>
         </div>))}
       </div>
     </div>
     <div style={{display:"flex",justifyContent:"space-between",marginTop:14}}>
-      <button onClick={()=>setStep(Math.max(0,si-1))} disabled={si===0} style={{padding:"8px 18px",borderRadius:8,fontWeight:700,fontSize:12,cursor:si===0?"default":"pointer",background:"transparent",border:`1.5px solid ${si===0?C.border:C.dim}`,color:si===0?C.dim:C.text,fontFamily:"inherit"}}>{"←"} Previous</button>
-      <span style={{fontSize:11,color:C.dim,alignSelf:"center"}}>{si+1} / {flow.steps.length}</span>
-      <button onClick={()=>setStep(Math.min(flow.steps.length-1,si+1))} disabled={si>=flow.steps.length-1} style={{padding:"8px 18px",borderRadius:8,fontWeight:700,fontSize:12,cursor:si>=flow.steps.length-1?"default":"pointer",background:si>=flow.steps.length-1?C.border:s.color,border:"none",color:si>=flow.steps.length-1?C.dim:"#000",fontFamily:"inherit"}}>Next {"→"}</button>
+      <button onClick={()=>setStep(Math.max(0,si-1))} disabled={si===0} style={{padding:"8px 18px",borderRadius:8,fontWeight:700,fontSize:12,cursor:si===0?"default":"pointer",background:"transparent",border:`1.5px solid ${si===0?T.border:T.dim}`,color:si===0?T.dim:T.text,fontFamily:"inherit"}}>{"←"} Previous</button>
+      <span style={{fontSize:11,color:T.dim,alignSelf:"center"}}>{si+1} / {flow.steps.length}</span>
+      <button onClick={()=>setStep(Math.min(flow.steps.length-1,si+1))} disabled={si>=flow.steps.length-1} style={{padding:"8px 18px",borderRadius:8,fontWeight:700,fontSize:12,cursor:si>=flow.steps.length-1?"default":"pointer",background:si>=flow.steps.length-1?T.border:s.color,border:"none",color:si>=flow.steps.length-1?T.dim:"#000",fontFamily:"inherit"}}>Next {"→"}</button>
     </div>
   </div>);
 }
@@ -1011,6 +1032,7 @@ function SerializationFlows() {
 // ━━━ HEX INSPECTOR (enhanced with role hover + v2 examples) ━━━━━━━
 
 function Inspector() {
+  const T = useC();
   const [selEx,setSelEx] = useState(0);
   const [input,setInput] = useState(PSBT_EXAMPLES[0].hex);
   const [parsed,setParsed] = useState(null);
@@ -1043,8 +1065,8 @@ function Inspector() {
     const INAMES={0x00:"NON_WITNESS_UTXO",0x01:"WITNESS_UTXO",0x02:"PARTIAL_SIG",0x03:"SIGHASH_TYPE",0x04:"REDEEM_SCRIPT",0x05:"WITNESS_SCRIPT",0x06:"BIP32_DERIVATION",0x07:"FINAL_SCRIPTSIG",0x08:"FINAL_SCRIPTWITNESS",0x0e:"PREVIOUS_TXID",0x0f:"OUTPUT_INDEX",0x10:"SEQUENCE",0x11:"REQUIRED_TIME_LOCKTIME",0x12:"REQUIRED_HEIGHT_LOCKTIME",0x13:"TAP_KEY_SIG",0x14:"TAP_SCRIPT_SIG",0x15:"TAP_LEAF_SCRIPT",0x16:"TAP_BIP32_DERIVATION",0x17:"TAP_INTERNAL_KEY",0x18:"TAP_MERKLE_ROOT"};
     const ONAMES={0x00:"REDEEM_SCRIPT",0x01:"WITNESS_SCRIPT",0x02:"BIP32_DERIVATION",0x03:"AMOUNT",0x04:"SCRIPT",0x05:"TAP_INTERNAL_KEY",0x06:"TAP_TREE",0x07:"TAP_BIP32_DERIVATION"};
 
-    const mapColors={global:C.amber,inputs:C.green,outputs:C.blue};
-    const sections = [{id:"magic",label:"Magic: psbt+0xFF",start:0,end:5,color:C.red}];
+    const mapColors={global:T.amber,inputs:T.green,outputs:T.blue};
+    const sections = [{id:"magic",label:"Magic: psbt+0xFF",start:0,end:5,color:T.red}];
     let pos=5,mi=0,phase="global",ic=0,oc=0,fi=0;
 
     const parseMap = ()=>{
@@ -1058,7 +1080,7 @@ function Inspector() {
         // Check for separator
         const kl0=b(pos);
         if(kl0===0x00){
-          sections.push({id:"sep"+mi,label:"Separator 0x00",start:pos,end:pos+1,color:C.dim});
+          sections.push({id:"sep"+mi,label:"Separator 0x00",start:pos,end:pos+1,color:T.dim});
           pos++;mi++;
           if(phase==="global") phase="inputs";
           else if(phase==="inputs"){ic++;}
@@ -1101,7 +1123,7 @@ function Inspector() {
     }
 
     return {sections,bytes:totalBytes,maps:mi+1,inputs:ic,outputs:oc};
-  },[]);
+  },[T]);
 
   useEffect(()=>{if(input.trim())setParsed(parse(input));else setParsed(null);},[input,parse]);
 
@@ -1115,37 +1137,37 @@ function Inspector() {
     <div>
       <div style={{display:"flex",gap:6,marginBottom:10}}>
         {["all","v0","v2"].map(c=>(<button key={c} onClick={()=>setCat(c)} style={{
-          padding:"6px 14px",borderRadius:6,border:`1.5px solid ${cat===c?C.amber:C.border}`,
-          background:cat===c?C.amber+"12":"transparent",color:cat===c?C.amber:C.dim,
+          padding:"6px 14px",borderRadius:6,border:`1.5px solid ${cat===c?T.amber:T.border}`,
+          background:cat===c?T.amber+"12":"transparent",color:cat===c?T.amber:T.dim,
           fontWeight:700,fontSize:11,cursor:"pointer",fontFamily:"inherit",textTransform:"uppercase",letterSpacing:"0.05em",
         }}>{c==="all"?"All Examples":c==="v0"?"BIP-174 (v0)":"BIP-370 (v2)"}</button>))}
       </div>
       <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
         {filteredExamples.map(ex=>(<button key={ex.id} onClick={()=>loadExample(ex)} style={{
-          padding:"7px 12px",borderRadius:8,border:`1.5px solid ${PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?C.cyan:C.green):C.border}`,
-          background:PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?C.cyan:C.green)+"12":"transparent",
-          color:PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?C.cyan:C.green):C.dim,
+          padding:"7px 12px",borderRadius:8,border:`1.5px solid ${PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?T.cyan:T.green):T.border}`,
+          background:PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?T.cyan:T.green)+"12":"transparent",
+          color:PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?T.cyan:T.green):T.dim,
           fontWeight:700,fontSize:11,cursor:"pointer",fontFamily:"inherit",
         }}>{ex.cat==="v2"?"✨ ":""}{ex.label}</button>))}
       </div>
-      {curEx?.desc&&<div style={{fontSize:12,color:C.soft,marginBottom:12,lineHeight:1.6,padding:"8px 12px",borderRadius:8,background:(curEx.cat==="v2"?C.cyan:C.green)+"06",border:`1px solid ${curEx.cat==="v2"?C.cyan:C.green}20`}}>{curEx.desc}</div>}
+      {curEx?.desc&&<div style={{fontSize:12,color:T.soft,marginBottom:12,lineHeight:1.6,padding:"8px 12px",borderRadius:8,background:(curEx.cat==="v2"?T.cyan:T.green)+"06",border:`1px solid ${curEx.cat==="v2"?T.cyan:T.green}20`}}>{curEx.desc}</div>}
       <textarea value={input} onChange={e=>{setInput(e.target.value);setSelEx(-1);}} placeholder="Paste PSBT hex..." style={{
-        width:"100%",height:80,borderRadius:10,padding:14,background:"#050910",color:C.text,border:`1.5px solid ${C.border}`,
+        width:"100%",height:80,borderRadius:10,padding:14,background:T.codeBg,color:T.text,border:`1.5px solid ${T.border}`,
         fontFamily:"'JetBrains Mono',monospace",fontSize:11,resize:"vertical",outline:"none",lineHeight:1.7,
       }}/>
     </div>
     {parsed&&!parsed.error&&<div>
       <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
-        <Badge color={C.green}>{parsed.bytes} bytes</Badge>
-        <Badge color={C.blue}>{parsed.maps} maps</Badge>
-        <Badge color={C.amber}>{parsed.inputs} in</Badge>
-        <Badge color={C.purple}>{parsed.outputs} out</Badge>
+        <Badge color={T.green}>{parsed.bytes} bytes</Badge>
+        <Badge color={T.blue}>{parsed.maps} maps</Badge>
+        <Badge color={T.amber}>{parsed.inputs} in</Badge>
+        <Badge color={T.purple}>{parsed.outputs} out</Badge>
       </div>
       <HexViewerWithRoles hex={input.replace(/\s/g,"").toLowerCase()} sections={parsed.sections} roleMap={roleMap}/>
       {selEx>=0&&(curEx?.utxos?.length>0||curEx?.outputs?.length>0)&&<UTXOVisualizer utxos={curEx.utxos} outputs={curEx.outputs}/>}
     </div>}
-    {parsed?.error&&<div style={{padding:16,borderRadius:10,background:"#6b1c1c30",border:`1px solid ${C.red}30`}}>
-      <div style={{fontSize:13,color:C.red,fontWeight:700}}>{parsed.error}</div>
+    {parsed?.error&&<div style={{padding:16,borderRadius:10,background:T.red+"20",border:`1px solid ${T.red}30`}}>
+      <div style={{fontSize:13,color:T.red,fontWeight:700}}>{parsed.error}</div>
     </div>}
   </div>);
 }
@@ -1242,6 +1264,7 @@ function hexConversions(hexBytes) {
 }
 
 function HexConversionPanel({hexBytes,section,allBytes,color}) {
+  const T = useC();
   // For value sections, decode just the value bytes (skip the length prefix)
   const decodedBytes = useMemo(()=>{
     if(section?.isValue&&section.valStart!==undefined&&section.valEnd!==undefined){
@@ -1260,19 +1283,19 @@ function HexConversionPanel({hexBytes,section,allBytes,color}) {
   const isKey = section?.isKey;
   const isValue = section?.isValue;
   return (
-    <div style={{marginTop:8,padding:"12px 16px",borderRadius:10,background:"#050910",border:`1px solid ${color}25`,animation:"fadeIn 0.15s ease"}}>
+    <div style={{marginTop:8,padding:"12px 16px",borderRadius:10,background:T.codeBg,border:`1px solid ${color}25`,animation:"fadeIn 0.15s ease"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-        <div style={{fontSize:10,fontWeight:700,color:C.dim,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+        <div style={{fontSize:10,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.08em"}}>
           {isKey?"Key Decode":isValue?"Value Decode":"Decoded"} {sectionLabel&&<span style={{color,textTransform:"none"}}> \u2014 {sectionLabel}</span>}
         </div>
         {isKey&&section.keyType!==undefined&&<Badge color={color} small>type 0x{section.keyType.toString(16).padStart(2,"0")}</Badge>}
-        {decodedBytes.length>0&&<span style={{fontSize:10,color:C.dim,marginLeft:"auto"}}>{decodedBytes.length} bytes</span>}
+        {decodedBytes.length>0&&<span style={{fontSize:10,color:T.dim,marginLeft:"auto"}}>{decodedBytes.length} bytes</span>}
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:5}}>
         {conversions.map((cv,i)=>(
           <div key={i} style={{display:"grid",gridTemplateColumns:"140px 1fr",gap:8,alignItems:"baseline",padding:"4px 8px",borderRadius:6,background:cv.color+"06"}}>
             <span style={{fontSize:11,fontWeight:700,color:cv.color,fontFamily:"'JetBrains Mono',monospace"}}>{cv.label}</span>
-            <span style={{fontSize:11.5,color:C.soft,fontFamily:"'JetBrains Mono',monospace",wordBreak:"break-all"}}>{cv.value}</span>
+            <span style={{fontSize:11.5,color:T.soft,fontFamily:"'JetBrains Mono',monospace",wordBreak:"break-all"}}>{cv.value}</span>
           </div>
         ))}
       </div>
@@ -1281,6 +1304,7 @@ function HexConversionPanel({hexBytes,section,allBytes,color}) {
 }
 
 function HexViewerWithRoles({hex,sections,roleMap}) {
+  const T = useC();
   const [hov,setHov] = useState(null);
   const bytes = useMemo(() => hex.match(/.{1,2}/g)||[], [hex]);
   const bmap = useMemo(() => {
@@ -1309,13 +1333,13 @@ function HexViewerWithRoles({hex,sections,roleMap}) {
   },[hovSection,bytes]);
   return (
     <div>
-      <div style={{background:"#050910",borderRadius:10,padding:16,border:`1px solid ${C.border}`,lineHeight:2.1,overflowX:"auto"}}>
+      <div style={{background:T.codeBg,borderRadius:10,padding:16,border:`1px solid ${T.border}`,lineHeight:2.1,overflowX:"auto"}}>
         {bytes.map((b,i) => {
           const s=bmap[i]; const hi=hov&&s&&s.id===hov;
           const isKey=s?.isKey;
           return <span key={i} onMouseEnter={()=>s&&setHov(s.id)} onMouseLeave={()=>setHov(null)} style={{
             display:"inline-block",padding:"1px 3px",margin:"1px",fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,
-            color:hi?"#fff":(s?s.color:C.dim),opacity:isKey&&!hi?0.55:1,
+            color:hi?(T.isDark?"#fff":"#000"):(s?s.color:T.dim),opacity:isKey&&!hi?0.55:1,
             background:hi?s.color+"35":(s?s.color+(isKey?"05":"0a"):"transparent"),
             borderRadius:3,cursor:s?"pointer":"default",borderBottom:`2px solid ${s?s.color+(hi?"90":(isKey?"20":"40")):"transparent"}`,transition:"all 0.12s",
           }}>{b}</span>;
@@ -1328,15 +1352,15 @@ function HexViewerWithRoles({hex,sections,roleMap}) {
           background:hov===s.id?s.color+"18":"transparent",border:`1px solid ${hov===s.id?s.color+"40":"transparent"}`,transition:"all 0.15s",
         }}>
           <span style={{width:10,height:10,borderRadius:3,background:s.color,flexShrink:0}}/>
-          <span style={{fontSize:11.5,color:hov===s.id?s.color:C.soft,fontWeight:600}}>{s.label}</span>
-          <span style={{fontSize:10,color:C.dim}}>({s.end-s.start}b)</span>
+          <span style={{fontSize:11.5,color:hov===s.id?s.color:T.soft,fontWeight:600}}>{s.label}</span>
+          <span style={{fontSize:10,color:T.dim}}>({s.end-s.start}b)</span>
         </div>)}
       </div>
       {/* Hex conversion panel */}
       {hovSection&&hovBytes&&<HexConversionPanel hexBytes={hovBytes} section={hovSection} allBytes={bytes} color={hovSection.color}/>}
       {/* Role tooltip — enriched with role breakdown */}
       {hovRole&&(()=>{
-        const roleColors = {"Creator":C.amber,"Updater":C.blue,"Signer":C.green,"Combiner":C.purple,"Finalizer":C.orange,"Extractor":C.cyan,"Constructor":C.teal};
+        const roleColors = {"Creator":T.amber,"Updater":T.blue,"Signer":T.green,"Combiner":T.purple,"Finalizer":T.orange,"Extractor":T.cyan,"Constructor":T.teal};
         const roleIcons = {"Creator":"✦","Updater":"⬆","Signer":"✍","Combiner":"⊕","Finalizer":"◉","Extractor":"→","Constructor":"⚒"};
         const detectedRoles = [];
         for(const rn of Object.keys(roleColors)){
@@ -1346,12 +1370,12 @@ function HexViewerWithRoles({hex,sections,roleMap}) {
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
             <span style={{fontSize:16}}>{hovSection.label.includes("Global")?"⊕":hovSection.label.includes("Input")?"←":hovSection.label.includes("Output")?"→":"⊙"}</span>
             <span style={{fontSize:13,fontWeight:800,color:hovSection.color}}>{hovSection.label}</span>
-            <span style={{fontSize:10,color:C.dim,marginLeft:"auto"}}>{hovSection.end-hovSection.start} bytes</span>
+            <span style={{fontSize:10,color:T.dim,marginLeft:"auto"}}>{hovSection.end-hovSection.start} bytes</span>
           </div>
           {detectedRoles.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-            {detectedRoles.map(rn=><span key={rn} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700,background:(roleColors[rn]||C.dim)+"15",color:roleColors[rn]||C.dim,border:`1px solid ${(roleColors[rn]||C.dim)}30`}}>{roleIcons[rn]||"•"} {rn}</span>)}
+            {detectedRoles.map(rn=><span key={rn} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700,background:(roleColors[rn]||T.dim)+"15",color:roleColors[rn]||T.dim,border:`1px solid ${(roleColors[rn]||T.dim)}30`}}>{roleIcons[rn]||"•"} {rn}</span>)}
           </div>}
-          <div style={{fontSize:12,color:C.soft,lineHeight:1.7}}>{hovRole}</div>
+          <div style={{fontSize:12,color:T.soft,lineHeight:1.7}}>{hovRole}</div>
         </div>;
       })()}
     </div>
@@ -1364,7 +1388,6 @@ const TABS = [
   {id:"overview",label:"Overview",icon:"§"},
   {id:"builder",label:"Build a PSBT",icon:"▶"},
   {id:"scenarios",label:"Scenarios",icon:"○"},
-  {id:"structure",label:"Structure",icon:"▣"},
   {id:"fields",label:"Field Maps",icon:"≡"},
   {id:"encoding",label:"Encoding",icon:"A̲"},
   {id:"compare",label:"V0 vs V2",icon:"⇄"},
@@ -1373,35 +1396,42 @@ const TABS = [
 ];
 
 export default function PSBTPlayground() {
+  const T = useC();
+  const { dark, toggle } = useTheme();
   const [tab,setTab] = useState("overview");
   const [bv,setBv] = useState("v0");
   const VerTabs = () => (<div style={{display:"flex",gap:6,marginBottom:20}}>
-    <button onClick={()=>setBv("v0")} style={{padding:"9px 20px",borderRadius:8,border:bv==="v0"?"1.5px solid "+C.amber+"50":"1.5px solid transparent",background:bv==="v0"?C.amber+"12":"transparent",color:bv==="v0"?C.amber:C.dim,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>BIP-174 (v0)</button>
-    <button onClick={()=>setBv("v2")} style={{padding:"9px 20px",borderRadius:8,border:bv==="v2"?"1.5px solid "+C.cyan+"50":"1.5px solid transparent",background:bv==="v2"?C.cyan+"12":"transparent",color:bv==="v2"?C.cyan:C.dim,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>BIP-370 (v2)</button>
+    <button onClick={()=>setBv("v0")} style={{padding:"9px 20px",borderRadius:8,border:bv==="v0"?"1.5px solid "+T.amber+"50":"1.5px solid transparent",background:bv==="v0"?T.amber+"12":"transparent",color:bv==="v0"?T.amber:T.dim,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>BIP-174 (v0)</button>
+    <button onClick={()=>setBv("v2")} style={{padding:"9px 20px",borderRadius:8,border:bv==="v2"?"1.5px solid "+T.cyan+"50":"1.5px solid transparent",background:bv==="v2"?T.cyan+"12":"transparent",color:bv==="v2"?T.cyan:T.dim,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>BIP-370 (v2)</button>
   </div>);
 
   return (
-    <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+    <div style={{minHeight:"100vh",background:T.bg,color:T.text,fontFamily:"'DM Sans',system-ui,sans-serif",transition:"background 0.3s, color 0.3s"}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-        *{box-sizing:border-box}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}
+        *{box-sizing:border-box}::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:${T.border};border-radius:3px}
         @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-        textarea:focus{border-color:${C.borderHi}!important} button{font-family:inherit}
+        textarea:focus{border-color:${T.borderHi}!important} button{font-family:inherit}
       `}</style>
 
-      <div style={{padding:"28px 28px 0",borderBottom:"1px solid "+C.border,background:"linear-gradient(180deg,"+C.card+" 0%,"+C.bg+" 100%)"}}>
+      <div style={{padding:"28px 28px 0",borderBottom:"1px solid "+T.border,background:"linear-gradient(180deg,"+T.card+" 0%,"+T.bg+" 100%)"}}>
         <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:4}}>
-          <div style={{width:42,height:42,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",background:C.amber+"15",border:"2px solid "+C.amber+"40",fontSize:22}}>{"₿"}</div>
-          <div>
-            <h1 style={{margin:0,fontSize:24,fontWeight:800,color:C.amber,letterSpacing:"-0.03em"}}>PSBT Playground</h1>
-            <p style={{margin:0,fontSize:13,color:C.soft}}>Partially Signed Bitcoin Transactions — BIP-174 &amp; BIP-370</p>
+          <div style={{width:42,height:42,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",background:T.amber+"15",border:"2px solid "+T.amber+"40",fontSize:22}}>{"₿"}</div>
+          <div style={{flex:1}}>
+            <h1 style={{margin:0,fontSize:24,fontWeight:800,color:T.amber,letterSpacing:"-0.03em"}}>PSBT Playground</h1>
+            <p style={{margin:0,fontSize:13,color:T.soft}}>Partially Signed Bitcoin Transactions — BIP-174 &amp; BIP-370</p>
           </div>
+          <button onClick={toggle} style={{
+            width:40,height:40,borderRadius:10,border:`1.5px solid ${T.border}`,background:T.surface,
+            cursor:"pointer",fontSize:20,display:"flex",alignItems:"center",justifyContent:"center",
+            transition:"all 0.25s",color:T.amber,
+          }} title={dark?"Switch to light theme":"Switch to dark theme"}>{dark?"☀":"☾"}</button>
         </div>
         <div style={{display:"flex",flexWrap:"wrap",gap:2,marginTop:16}}>
           {TABS.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{
             padding:"10px 16px",border:"none",cursor:"pointer",
-            background:tab===t.id?C.amber+"12":"transparent",color:tab===t.id?C.amber:C.dim,
-            fontWeight:700,fontSize:13,borderBottom:tab===t.id?"2.5px solid "+C.amber:"2.5px solid transparent",
+            background:tab===t.id?T.amber+"12":"transparent",color:tab===t.id?T.amber:T.dim,
+            fontWeight:700,fontSize:13,borderBottom:tab===t.id?"2.5px solid "+T.amber:"2.5px solid transparent",
             transition:"all 0.2s",display:"flex",alignItems:"center",gap:6,
           }}><span style={{fontSize:15}}>{t.icon}</span>{t.label}</button>))}
         </div>
@@ -1411,22 +1441,22 @@ export default function PSBTPlayground() {
 
         {tab==="overview"&&<div style={{display:"flex",flexDirection:"column",gap:28,animation:"fadeIn 0.3s ease"}}>
           <Card>
-            <Head icon="§" color={C.amber}>What is a PSBT?</Head>
-            <div style={{fontSize:14,color:C.soft,lineHeight:1.9}}>
-              <p style={{margin:"0 0 14px"}}>A <strong style={{color:C.amber}}>Partially Signed Bitcoin Transaction (PSBT)</strong> is a standardized binary format (BIP-174) enabling multiple parties and devices to collaboratively construct, sign, and finalize Bitcoin transactions without any party holding all information at once.</p>
-              <p style={{margin:"0 0 14px"}}>PSBTs carry an <strong style={{color:C.text}}>unsigned (or partially signed) transaction</strong> alongside all auxiliary metadata — UTXO information, derivation paths, scripts, partial signatures — in structured <strong style={{color:C.text}}>key-value maps</strong>.</p>
+            <Head icon="§" color={T.amber}>What is a PSBT?</Head>
+            <div style={{fontSize:14,color:T.soft,lineHeight:1.9}}>
+              <p style={{margin:"0 0 14px"}}>A <strong style={{color:T.amber}}>Partially Signed Bitcoin Transaction (PSBT)</strong> is a standardized binary format (BIP-174) enabling multiple parties and devices to collaboratively construct, sign, and finalize Bitcoin transactions without any party holding all information at once.</p>
+              <p style={{margin:"0 0 14px"}}>PSBTs carry an <strong style={{color:T.text}}>unsigned (or partially signed) transaction</strong> alongside all auxiliary metadata — UTXO information, derivation paths, scripts, partial signatures — in structured <strong style={{color:T.text}}>key-value maps</strong>.</p>
               <p style={{margin:0}}>The format is transport-agnostic: files, QR codes, NFC, or any channel.</p>
             </div>
           </Card>
-          <Card><Head icon="↻" color={C.green} sub="Click each role to see full responsibilities.">The PSBT Workflow — Six Roles</Head><RoleFlow/></Card>
+          <Card><Head icon="↻" color={T.green} sub="Click each role to see full responsibilities.">The PSBT Workflow — Six Roles</Head><RoleFlow/></Card>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-            <Card style={{borderColor:C.amber+"30"}}>
-              <div style={{fontSize:16,fontWeight:800,color:C.amber,marginBottom:8}}>{"§"} BIP-174 (v0)</div>
-              <p style={{margin:0,fontSize:13,color:C.soft,lineHeight:1.75}}>Original PSBT. Stores complete unsigned tx in global map. Structure fixed once created. Widely supported.</p>
+            <Card style={{borderColor:T.amber+"30"}}>
+              <div style={{fontSize:16,fontWeight:800,color:T.amber,marginBottom:8}}>{"§"} BIP-174 (v0)</div>
+              <p style={{margin:0,fontSize:13,color:T.soft,lineHeight:1.75}}>Original PSBT. Stores complete unsigned tx in global map. Structure fixed once created. Widely supported.</p>
             </Card>
-            <Card style={{borderColor:C.cyan+"30"}}>
-              <div style={{fontSize:16,fontWeight:800,color:C.cyan,marginBottom:8}}>{"⚒"} BIP-370 (v2)</div>
-              <p style={{margin:0,fontSize:13,color:C.soft,lineHeight:1.75}}>Extended PSBT. Decomposes tx into per-input/per-output fields. Supports modifiable transactions. Essential for CoinJoin.</p>
+            <Card style={{borderColor:T.cyan+"30"}}>
+              <div style={{fontSize:16,fontWeight:800,color:T.cyan,marginBottom:8}}>{"⚒"} BIP-370 (v2)</div>
+              <p style={{margin:0,fontSize:13,color:T.soft,lineHeight:1.75}}>Extended PSBT. Decomposes tx into per-input/per-output fields. Supports modifiable transactions. Essential for CoinJoin.</p>
             </Card>
           </div>
         </div>}
@@ -1435,23 +1465,18 @@ export default function PSBTPlayground() {
           <div style={{marginBottom:18}}>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <span style={{fontSize:22}}>{"▶"}</span>
-              <h3 style={{margin:0,fontSize:18,fontWeight:800,color:C.amber,letterSpacing:"-0.01em"}}>Build a PSBT — Click by Click</h3>
+              <h3 style={{margin:0,fontSize:18,fontWeight:800,color:T.amber,letterSpacing:"-0.01em"}}>Build a PSBT — Click by Click</h3>
             </div>
-            <p style={{margin:"6px 0 0 32px",fontSize:13,color:C.soft,lineHeight:1.7}}>Step through PSBT construction byte by byte. Four scenarios: v0 and v2, simple and multi-input. Compare how the same transaction looks in each format.</p>
+            <p style={{margin:"6px 0 0 32px",fontSize:13,color:T.soft,lineHeight:1.7}}>Step through PSBT construction byte by byte. Four scenarios: v0 and v2, simple and multi-input. Compare how the same transaction looks in each format.</p>
           </div>
           <PSBTBuilderGame/>
         </Card></div>}
 
         {tab==="scenarios"&&<div style={{animation:"fadeIn 0.3s ease"}}>
-          <Head icon="○" color={C.green} sub="Three real-world scenarios. Pick one and step through each role.">Interactive Scenario Walkthroughs</Head>
+          <Head icon="○" color={T.green} sub="Three real-world scenarios. Pick one and step through each role.">Interactive Scenario Walkthroughs</Head>
           <Scenarios/>
         </div>}
 
-        {tab==="structure"&&<div style={{display:"flex",flexDirection:"column",gap:24,animation:"fadeIn 0.3s ease"}}>
-          <VerTabs/>
-          <Card><Head icon="▣" color={bv==="v2"?C.cyan:C.amber} sub="Click each section to expand.">Binary Structure — PSBT {bv==="v2"?"v2":"v0"}</Head><Structure version={bv==="v2"?2:0}/></Card>
-          <Card><Head icon="↻" color={C.green} sub="Click each role.">Role Flow</Head><RoleFlow/></Card>
-        </div>}
 
         {tab==="fields"&&<div style={{display:"flex",flexDirection:"column",gap:24,animation:"fadeIn 0.3s ease"}}>
           <VerTabs/>
@@ -1462,15 +1487,15 @@ export default function PSBTPlayground() {
           </>:<>
             <Card>
               <FieldTable fields={[...GLOBAL_V0.filter(f=>f.key!=="0x00"),...V2_GLOBAL]} title="Global Map Fields (v2)" icon="⊕"/>
-              <InfoBox color={C.cyan} icon="⚡"><strong style={{color:C.cyan}}>v2:</strong> UNSIGNED_TX (0x00) excluded. Tx data decomposed into per-input/per-output fields.</InfoBox>
+              <InfoBox color={T.cyan} icon="⚡"><strong style={{color:T.cyan}}>v2:</strong> UNSIGNED_TX (0x00) excluded. Tx data decomposed into per-input/per-output fields.</InfoBox>
             </Card>
             <Card>
               <FieldTable fields={[...INPUT_V0,...V2_INPUT]} title="Per-Input Map Fields (v2)" icon="←"/>
-              <InfoBox color={C.green} icon="⚡"><strong style={{color:C.green}}>New:</strong> PREVIOUS_TXID + OUTPUT_INDEX replace unsigned tx. SEQUENCE + locktime per-input.</InfoBox>
+              <InfoBox color={T.green} icon="⚡"><strong style={{color:T.green}}>New:</strong> PREVIOUS_TXID + OUTPUT_INDEX replace unsigned tx. SEQUENCE + locktime per-input.</InfoBox>
             </Card>
             <Card>
               <FieldTable fields={[...OUTPUT_V0,...V2_OUTPUT]} title="Per-Output Map Fields (v2)" icon="→"/>
-              <InfoBox color={C.blue} icon="⚡"><strong style={{color:C.blue}}>New:</strong> AMOUNT + SCRIPT explicit per output.</InfoBox>
+              <InfoBox color={T.blue} icon="⚡"><strong style={{color:T.blue}}>New:</strong> AMOUNT + SCRIPT explicit per output.</InfoBox>
             </Card>
           </>}
         </div>}
@@ -1478,14 +1503,14 @@ export default function PSBTPlayground() {
         {tab==="encoding"&&<div style={{animation:"fadeIn 0.3s ease"}}><Card><KVEncoding/></Card></div>}
 
         {tab==="compare"&&<div style={{animation:"fadeIn 0.3s ease"}}><Card>
-          <Head icon="⚖️" color={C.cyan} sub="Click any row for the rationale.">BIP-174 (v0) vs BIP-370 (v2)</Head>
+          <Head icon="⚖️" color={T.cyan} sub="Click any row for the rationale.">BIP-174 (v0) vs BIP-370 (v2)</Head>
           <Compare/>
         </Card></div>}
 
         {tab==="serial"&&<div style={{animation:"fadeIn 0.3s ease"}}><Card><SerializationFlows/></Card></div>}
 
         {tab==="inspector"&&<div style={{animation:"fadeIn 0.3s ease"}}><Card>
-          <Head icon="⊙" color={C.green} sub="Select an example or paste hex. Hover map labels to see which PSBT role populated each section.">Hex Inspector</Head>
+          <Head icon="⊙" color={T.green} sub="Select an example or paste hex. Hover map labels to see which PSBT role populated each section.">Hex Inspector</Head>
           <Inspector/>
         </Card></div>}
 
