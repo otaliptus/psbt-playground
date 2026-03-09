@@ -722,13 +722,12 @@ function LiveHex({ hex, segments, highlightLast }) {
             const isNew = highlightLast && lastSeg && i >= lastSeg.start && i < lastSeg.end;
             return (
               <span key={i} style={{
-                display:"inline-block", padding:"1px 3px", margin:"1px",
+                display:"inline-block", width:22, textAlign:"center",
+                padding:"1px 0", margin:"1px 0",
                 color: isNew ? (T.isDark?"#fff":"#000") : (seg ? seg.color : T.dim),
                 background: isNew ? (seg?.color||T.amber)+"35" : (seg ? seg.color+"0a" : "transparent"),
                 borderRadius:3,
                 borderBottom: `2px solid ${seg ? seg.color+(isNew?"90":"40") : "transparent"}`,
-                transition:"all 0.15s",
-                animation: isNew ? "fadeIn 0.3s ease" : "none",
               }}>{b}</span>
             );
           })
