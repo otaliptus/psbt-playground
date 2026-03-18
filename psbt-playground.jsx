@@ -652,20 +652,21 @@ function HexViewer({hex,sections}) {
   }, [bytes,sections]);
   return (
     <div>
-      <div style={{background:T.codeBg,borderRadius:10,padding:16,border:`1px solid ${T.border}`,lineHeight:2.1,overflowX:"auto"}}>
+      <div onMouseLeave={()=>setHov(null)} style={{background:T.codeBg,borderRadius:10,padding:16,border:`1px solid ${T.border}`,lineHeight:2.1,overflowX:"auto"}}>
         {bytes.map((b,i) => {
           const s=bmap[i]; const hi=hov&&s&&s.id===hov;
-          return <span key={i} onMouseEnter={()=>s&&setHov(s.id)} onMouseLeave={()=>setHov(null)} style={{
-            display:"inline-block",padding:"1px 3px",margin:"1px",fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,
+          return <span key={i} onMouseEnter={()=>s&&setHov(s.id)} style={{
+            display:"inline-block",width:22,textAlign:"center",padding:"1px 0",margin:"1px 0",
+            fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,
             color:hi?(T.isDark?"#fff":"#000"):(s?s.color:T.dim),background:hi?s.color+"35":(s?s.color+"0a":"transparent"),
-            borderRadius:3,cursor:s?"pointer":"default",borderBottom:`2px solid ${s?s.color+(hi?"90":"40"):"transparent"}`,transition:"all 0.12s",
+            borderRadius:3,cursor:s?"pointer":"default",borderBottom:`2px solid ${s?s.color+(hi?"90":"40"):"transparent"}`,
           }}>{b}</span>;
         })}
       </div>
       {sections&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:10}}>
         {sections.map(s=><div key={s.id} onMouseEnter={()=>setHov(s.id)} onMouseLeave={()=>setHov(null)} style={{
           display:"flex",alignItems:"center",gap:6,padding:"4px 10px",borderRadius:6,cursor:"pointer",
-          background:hov===s.id?s.color+"18":"transparent",border:`1px solid ${hov===s.id?s.color+"40":"transparent"}`,transition:"all 0.15s",
+          background:hov===s.id?s.color+"18":"transparent",border:`1px solid ${hov===s.id?s.color+"40":"transparent"}`,
         }}>
           <span style={{width:10,height:10,borderRadius:3,background:s.color,flexShrink:0}}/>
           <span style={{fontSize:11.5,color:hov===s.id?s.color:T.soft,fontWeight:600}}>{s.label}</span>
@@ -1068,6 +1069,7 @@ function Inspector() {
     const mapColors={global:T.amber,inputs:T.green,outputs:T.blue};
     const sections = [{id:"magic",label:"Magic: psbt+0xFF",start:0,end:5,color:T.red}];
     let pos=5,mi=0,phase="global",ic=0,oc=0,fi=0;
+    let inputCount=-1; // will be detected from global map
 
     const parseMap = ()=>{
       const mapPhase=phase;
@@ -1082,9 +1084,28 @@ function Inspector() {
         if(kl0===0x00){
           sections.push({id:"sep"+mi,label:"Separator 0x00",start:pos,end:pos+1,color:T.dim});
           pos++;mi++;
-          if(phase==="global") phase="inputs";
-          else if(phase==="inputs"){ic++;}
-          else{oc++;}
+          if(phase==="global"){
+            phase="inputs";
+            // v0: extract input count from UNSIGNED_TX if we found it
+            if(inputCount<0){
+              const utxoSec = sections.find(s=>s.fieldName==="UNSIGNED_TX"&&s.isValue);
+              if(utxoSec){
+                // Parse tx to get input count: skip version (4B), check for segwit marker, read varint
+                const txStart = utxoSec.valStart;
+                let tp = txStart + 4; // skip version
+                if(tp<utxoSec.valEnd){
+                  const [cnt] = readCS(tp);
+                  inputCount = cnt;
+                }
+              }
+            }
+          } else if(phase==="inputs"){
+            ic++;
+            // Transition to outputs when we've seen all inputs
+            if(inputCount>=0 && ic>=inputCount) phase="outputs";
+          } else {
+            oc++;
+          }
           return true;
         }
         // Read key
@@ -1093,6 +1114,19 @@ function Inspector() {
         const keyStart=pos+klSize;
         const keyType=b(keyStart);
         const fieldName=names[keyType]||(keyType<=0x20?"UNKNOWN_0x"+keyType.toString(16).padStart(2,"0"):"PROPRIETARY");
+
+        // For v2: detect INPUT_COUNT from global map
+        if(phase==="global"&&keyType===0x04&&fieldName==="INPUT_COUNT"){
+          const vlp=keyStart+keyLen;
+          if(vlp<totalBytes){
+            const [vl,vs]=readCS(vlp);
+            const vStart=vlp+vs;
+            if(vl>0&&vStart<totalBytes){
+              const [cnt]=readCS(vStart);
+              inputCount=cnt;
+            }
+          }
+        }
 
         // Read value
         const valLenPos=keyStart+keyLen;
@@ -1148,25 +1182,27 @@ function Inspector() {
           background:PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?T.cyan:T.green)+"12":"transparent",
           color:PSBT_EXAMPLES[selEx]===ex?(ex.cat==="v2"?T.cyan:T.green):T.dim,
           fontWeight:700,fontSize:11,cursor:"pointer",fontFamily:"inherit",
-        }}>{ex.cat==="v2"?"✨ ":""}{ex.label}</button>))}
+        }}>{ex.cat==="v2"?"\u2728 ":""}{ex.label}</button>))}
       </div>
-      {curEx?.desc&&<div style={{fontSize:12,color:T.soft,marginBottom:12,lineHeight:1.6,padding:"8px 12px",borderRadius:8,background:(curEx.cat==="v2"?T.cyan:T.green)+"06",border:`1px solid ${curEx.cat==="v2"?T.cyan:T.green}20`}}>{curEx.desc}</div>}
+      {curEx?.desc&&<div style={{fontSize:12,color:T.soft,marginBottom:12,lineHeight:1.6,padding:"10px 14px",borderRadius:10,background:(curEx.cat==="v2"?T.cyan:T.green)+"06",border:`1px solid ${curEx.cat==="v2"?T.cyan:T.green}18`}}><Fmt text={curEx.desc} codeBg={T.codeBg} accent={curEx.cat==="v2"?T.cyan:T.green}/></div>}
       <textarea value={input} onChange={e=>{setInput(e.target.value);setSelEx(-1);}} placeholder="Paste PSBT hex..." style={{
-        width:"100%",height:80,borderRadius:10,padding:14,background:T.codeBg,color:T.text,border:`1.5px solid ${T.border}`,
+        width:"100%",height:72,borderRadius:10,padding:14,background:T.codeBg,color:T.text,border:`1.5px solid ${T.border}`,
         fontFamily:"'JetBrains Mono',monospace",fontSize:11,resize:"vertical",outline:"none",lineHeight:1.7,
+        boxSizing:"border-box",
       }}/>
     </div>
     {parsed&&!parsed.error&&<div>
-      <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
-        <Badge color={T.green}>{parsed.bytes} bytes</Badge>
-        <Badge color={T.blue}>{parsed.maps} maps</Badge>
-        <Badge color={T.amber}>{parsed.inputs} in</Badge>
-        <Badge color={T.purple}>{parsed.outputs} out</Badge>
+      <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+        <Badge color={T.dim}>{parsed.bytes} bytes</Badge>
+        <span style={{color:T.dim,fontSize:10}}>\u2022</span>
+        <Badge color={T.amber}>{parsed.maps} maps</Badge>
+        <Badge color={T.green}>{parsed.inputs} {parsed.inputs===1?"input":"inputs"}</Badge>
+        <Badge color={T.blue}>{parsed.outputs} {parsed.outputs===1?"output":"outputs"}</Badge>
       </div>
       <HexViewerWithRoles hex={input.replace(/\s/g,"").toLowerCase()} sections={parsed.sections} roleMap={roleMap}/>
       {selEx>=0&&(curEx?.utxos?.length>0||curEx?.outputs?.length>0)&&<UTXOVisualizer utxos={curEx.utxos} outputs={curEx.outputs}/>}
     </div>}
-    {parsed?.error&&<div style={{padding:16,borderRadius:10,background:T.red+"20",border:`1px solid ${T.red}30`}}>
+    {parsed?.error&&<div style={{padding:16,borderRadius:12,background:T.red+"10",border:`1px solid ${T.red}20`}}>
       <div style={{fontSize:13,color:T.red,fontWeight:700}}>{parsed.error}</div>
     </div>}
   </div>);
@@ -1176,87 +1212,155 @@ function Inspector() {
 
 const OPCODES = {0x00:"OP_0",0x4c:"OP_PUSHDATA1",0x4d:"OP_PUSHDATA2",0x4e:"OP_PUSHDATA4",0x51:"OP_1",0x52:"OP_2",0x53:"OP_3",0x54:"OP_4",0x55:"OP_5",0x56:"OP_6",0x57:"OP_7",0x58:"OP_8",0x59:"OP_9",0x5a:"OP_10",0x5b:"OP_11",0x5c:"OP_12",0x5d:"OP_13",0x5e:"OP_14",0x5f:"OP_15",0x60:"OP_16",0x76:"OP_DUP",0x87:"OP_EQUAL",0x88:"OP_EQUALVERIFY",0xa9:"OP_HASH160",0xac:"OP_CHECKSIG",0xad:"OP_CHECKSIGVERIFY",0xae:"OP_CHECKMULTISIG",0xaf:"OP_CHECKMULTISIGVERIFY",0xba:"OP_CHECKSIGADD"};
 
-function hexConversions(hexBytes) {
+function hexConversions(hexBytes, fieldName, T) {
   if(!hexBytes||hexBytes.length===0) return [];
   const len = hexBytes.length;
   const out = [];
+  const colors = T || C; // fallback to module-level C
 
-  // Raw hex
+  // Context-aware: which interpretations are relevant?
+  const isTxid = fieldName==="PREVIOUS_TXID"||fieldName==="UNSIGNED_TX";
+  const isAmount = fieldName==="AMOUNT";
+  const isScript = fieldName==="SCRIPT"||fieldName==="REDEEM_SCRIPT"||fieldName==="WITNESS_SCRIPT"||fieldName==="FINAL_SCRIPTSIG";
+  const isIndex = fieldName==="OUTPUT_INDEX";
+  const isSeq = fieldName==="SEQUENCE";
+  const isVersion = fieldName==="VERSION"||fieldName==="TX_VERSION";
+  const isSighash = fieldName==="SIGHASH_TYPE";
+  const isLocktime = fieldName==="FALLBACK_LOCKTIME"||fieldName==="REQUIRED_TIME_LOCKTIME"||fieldName==="REQUIRED_HEIGHT_LOCKTIME";
+  const isPubkey = fieldName==="TAP_INTERNAL_KEY"||fieldName==="TAP_MERKLE_ROOT";
+  const isSig = fieldName==="TAP_KEY_SIG"||fieldName==="PARTIAL_SIG"||fieldName==="TAP_SCRIPT_SIG";
+  const isCount = fieldName==="INPUT_COUNT"||fieldName==="OUTPUT_COUNT";
+  const isModifiable = fieldName==="TX_MODIFIABLE";
+  const hasContext = !!(fieldName && fieldName !== "");
+
+  // Raw hex — always shown but abbreviated for long values
   const rawHex = hexBytes.join(" ");
-  if(len<=40) out.push({label:"Hex",value:rawHex,color:C.dim});
-  else out.push({label:"Hex",value:hexBytes.slice(0,16).join(" ")+" ... "+hexBytes.slice(-4).join(" ")+" ("+len+" bytes)",color:C.dim});
+  if(len<=40) out.push({label:"Hex",value:rawHex,color:colors.dim});
+  else out.push({label:"Hex",value:hexBytes.slice(0,12).join(" ")+" \u2026 "+hexBytes.slice(-4).join(" "),note:len+" bytes",color:colors.dim});
 
-  // ASCII
-  const ascii = hexBytes.map(b=>{const c=parseInt(b,16);return c>=0x20&&c<=0x7e?String.fromCharCode(c):".";}).join("");
-  const printable = hexBytes.filter(b=>{const c=parseInt(b,16);return c>=0x20&&c<=0x7e;}).length;
-  if(printable>len*0.6&&len<=64) out.push({label:"ASCII",value:ascii,color:C.green});
+  // ── Context-aware decodings ──
 
-  // LE uint (up to 8 bytes)
+  // 32-byte txid → reversed display order
+  if(len===32&&(isTxid||isPubkey||!hasContext)){
+    const rev=[...hexBytes].reverse().join("");
+    out.push({label:isTxid?"txid (display)":isPubkey?"x-only pubkey":"Reversed",value:rev.slice(0,16)+"\u2026"+rev.slice(-16),color:colors.orange});
+  }
+
+  // Amount (8 bytes LE) → satoshis + BTC
+  if(len===8&&(isAmount||!hasContext)){
+    let val=BigInt(0);
+    for(let i=0;i<len;i++) val|=BigInt(parseInt(hexBytes[i],16))<<BigInt(i*8);
+    const sats=Number(val);
+    out.push({label:"Amount",value:sats.toLocaleString()+" sats  =  "+(sats/1e8).toFixed(8)+" BTC",color:colors.green});
+  }
+
+  // LE uint (1-8 bytes)
   if(len>=1&&len<=8){
     let val=BigInt(0);
     for(let i=0;i<len;i++) val|=BigInt(parseInt(hexBytes[i],16))<<BigInt(i*8);
-    out.push({label:"LE uint"+len*8,value:val.toLocaleString(),color:C.amber});
-    // BE uint
-    let be=BigInt(0);
-    for(let i=0;i<len;i++) be=(be<<BigInt(8))|BigInt(parseInt(hexBytes[i],16));
-    if(be!==val) out.push({label:"BE uint"+len*8,value:be.toLocaleString(),color:C.orange});
-    // Satoshi → BTC (for 8-byte LE values)
-    if(len===8){
-      const sats=Number(val);
-      out.push({label:"Satoshis",value:sats.toLocaleString()+" sats",color:C.amber});
-      out.push({label:"BTC",value:(sats/1e8).toFixed(8)+" BTC",color:C.green});
+    // Skip generic uint for amount fields (already shown as BTC above)
+    if(!isAmount){
+      const label = isVersion?"Version":isIndex?"Output index":isSeq?"Sequence":isCount?"Count":isSighash?"Sighash type":"LE uint"+len*8;
+      out.push({label,value:val.toLocaleString(),color:colors.amber});
     }
-    // For 4-byte: also show as signed int32
-    if(len===4){
+
+    // Sighash type decode
+    if(isSighash&&len===4){
+      const v=Number(val);
+      const names={0:"DEFAULT (Taproot)",1:"ALL",2:"NONE",3:"SINGLE",0x81:"ALL|ANYONECANPAY",0x82:"NONE|ANYONECANPAY",0x83:"SINGLE|ANYONECANPAY"};
+      if(names[v]) out.push({label:"Sighash",value:names[v],color:colors.cyan});
+    }
+
+    // TX_MODIFIABLE flags
+    if(isModifiable&&len>=1){
+      const v=Number(val);
+      const flags=[];
+      if(v&1) flags.push("inputs modifiable");
+      if(v&2) flags.push("outputs modifiable");
+      if(v&4) flags.push("has SIGHASH_SINGLE");
+      out.push({label:"Flags",value:flags.length?flags.join(" + "):"locked (no modifications)",color:colors.teal});
+    }
+
+    // Locktime interpretation (4 bytes)
+    if(len===4&&(isLocktime||!hasContext)){
       const u32=Number(val);
-      const s32=u32>0x7FFFFFFF?u32-0x100000000:u32;
-      if(s32!==u32) out.push({label:"LE int32",value:s32.toLocaleString(),color:C.purple});
-      // Locktime interpretation
-      if(u32>=500000000) out.push({label:"Unix time",value:new Date(u32*1000).toISOString().slice(0,19)+"Z",color:C.cyan});
-      else if(u32>0&&u32<500000000) out.push({label:"Block height",value:"#"+u32.toLocaleString(),color:C.cyan});
+      if(u32>=500000000) out.push({label:"Unix time",value:new Date(u32*1000).toISOString().slice(0,19)+"Z",color:colors.cyan});
+      else if(u32>0&&u32<500000000) out.push({label:"Block height",value:"#"+u32.toLocaleString(),color:colors.cyan});
+    }
+
+    // Sequence decode
+    if(isSeq&&len===4){
+      const u32=Number(val);
+      if(u32===0xffffffff) out.push({label:"Sequence",value:"final (RBF disabled, no locktime)",color:colors.dim});
+      else if(u32===0xfffffffe) out.push({label:"Sequence",value:"locktime enabled, RBF disabled",color:colors.cyan});
+      else if(u32===0xfffffffd) out.push({label:"Sequence",value:"RBF signaled (BIP-125)",color:colors.orange});
+      else if(u32<0x80000000&&(u32&0xffff)<512){
+        const blocks = u32&0xffff;
+        out.push({label:"Relative lock",value:blocks+" blocks (~"+(blocks*10/60).toFixed(1)+" hrs)",color:colors.cyan});
+      }
+    }
+
+    // BE uint only when no specific context and differs from LE
+    if(!hasContext){
+      let be=BigInt(0);
+      for(let i=0;i<len;i++) be=(be<<BigInt(8))|BigInt(parseInt(hexBytes[i],16));
+      if(be!==val) out.push({label:"BE uint"+len*8,value:be.toLocaleString(),color:colors.orange});
     }
   }
 
-  // Reversed hex (for 32-byte txids)
-  if(len===32){
-    const rev=[...hexBytes].reverse().join("");
-    out.push({label:"Reversed (display order)",value:rev.slice(0,16)+"..."+rev.slice(-16),color:C.orange});
+  // Signature info
+  if(isSig){
+    if(len===64) out.push({label:"Signature",value:"64-byte Schnorr (BIP-340), SIGHASH_DEFAULT implied",color:colors.green});
+    else if(len===65) out.push({label:"Signature",value:"65-byte Schnorr + sighash byte (0x"+hexBytes[64]+")",color:colors.green});
+    else if(len>=70&&len<=73) out.push({label:"Signature",value:len+"-byte DER-encoded ECDSA",color:colors.green});
   }
 
-  // Script decode (for common script sizes)
-  if(len>=2&&len<=150){
-    const b0=parseInt(hexBytes[0],16);
+  // Script decode
+  if(isScript||(!hasContext&&len>=2&&len<=150)){
     const parts=[];
-    let pos=0, valid=true, steps=0;
-    while(pos<len&&steps<50){
+    let spos=0, valid=true, steps=0;
+    while(spos<len&&steps<50){
       steps++;
-      const op=parseInt(hexBytes[pos],16);
-      if(OPCODES[op]!==undefined){parts.push(OPCODES[op]);pos++;continue;}
+      const op=parseInt(hexBytes[spos],16);
+      if(OPCODES[op]!==undefined){parts.push(OPCODES[op]);spos++;continue;}
       if(op>=1&&op<=75){
-        const pushLen=op;
-        if(pos+1+pushLen>len){valid=false;break;}
-        const data=hexBytes.slice(pos+1,pos+1+pushLen).join("");
-        parts.push("<"+pushLen+"B:"+data.slice(0,12)+(data.length>12?"...":"")+">");
-        pos+=1+pushLen;continue;
+        if(spos+1+op>len){valid=false;break;}
+        const data=hexBytes.slice(spos+1,spos+1+op).join("");
+        parts.push("<"+op+"B:"+data.slice(0,16)+(data.length>16?"\u2026":"")+">");
+        spos+=1+op;continue;
       }
-      // Unknown opcode or raw data
       valid=false;break;
     }
-    if(valid&&parts.length>0&&pos===len){
-      out.push({label:"Script",value:parts.join(" "),color:C.blue});
+    if(valid&&parts.length>0&&spos===len){
+      // Detect common script patterns
+      const pj = parts.join(" ");
+      let scriptType = "";
+      if(pj.match(/^OP_0 <20B:/)) scriptType = "  (P2WPKH)";
+      else if(pj.match(/^OP_0 <32B:/)) scriptType = "  (P2WSH)";
+      else if(pj.match(/^OP_1 <32B:/)) scriptType = "  (P2TR)";
+      else if(pj.match(/OP_DUP OP_HASH160.*OP_EQUALVERIFY OP_CHECKSIG/)) scriptType = "  (P2PKH)";
+      else if(pj.match(/OP_HASH160.*OP_EQUAL$/)) scriptType = "  (P2SH)";
+      out.push({label:"Script",value:pj+scriptType,color:colors.blue});
     }
   }
 
-  // Compact-size decode (show what the first byte means as a varint prefix)
-  if(len>=1){
+  // ASCII (only when no context or for unknown fields)
+  if(!hasContext){
+    const ascii = hexBytes.map(b=>{const c=parseInt(b,16);return c>=0x20&&c<=0x7e?String.fromCharCode(c):".";}).join("");
+    const printable = hexBytes.filter(b=>{const c=parseInt(b,16);return c>=0x20&&c<=0x7e;}).length;
+    if(printable>len*0.6&&len<=64) out.push({label:"ASCII",value:ascii,color:colors.green});
+  }
+
+  // Compact-size (only when no context)
+  if(!hasContext&&len>=1){
     const fb=parseInt(hexBytes[0],16);
-    if(len===1&&fb<=252) out.push({label:"Compact-size",value:fb.toString()+" (literal)",color:C.purple});
+    if(len===1&&fb<=252) out.push({label:"Compact-size",value:fb.toString()+" (literal)",color:colors.purple});
     else if(fb===0xfd&&len>=3){
       const v=parseInt(hexBytes[1],16)|parseInt(hexBytes[2],16)<<8;
-      out.push({label:"Compact-size",value:v.toString()+" (0xFD + 2B LE)",color:C.purple});
+      out.push({label:"Compact-size",value:v.toString()+" (0xFD + 2B LE)",color:colors.purple});
     }else if(fb===0xfe&&len>=5){
       const v=parseInt(hexBytes[1],16)|parseInt(hexBytes[2],16)<<8|parseInt(hexBytes[3],16)<<16|parseInt(hexBytes[4],16)<<24;
-      out.push({label:"Compact-size",value:(v>>>0).toString()+" (0xFE + 4B LE)",color:C.purple});
+      out.push({label:"Compact-size",value:(v>>>0).toString()+" (0xFE + 4B LE)",color:colors.purple});
     }
   }
 
@@ -1277,25 +1381,30 @@ function HexConversionPanel({hexBytes,section,allBytes,color}) {
     return hexBytes;
   },[hexBytes,section,allBytes]);
 
-  const conversions = useMemo(()=>hexConversions(decodedBytes),[decodedBytes]);
+  const fieldName = section?.isValue ? section?.fieldName : null;
+  const conversions = useMemo(()=>hexConversions(decodedBytes, fieldName, T),[decodedBytes, fieldName, T]);
   if(!conversions.length) return null;
   const sectionLabel = section?.fieldName||section?.label||"";
   const isKey = section?.isKey;
   const isValue = section?.isValue;
   return (
-    <div style={{marginTop:8,padding:"12px 16px",borderRadius:10,background:T.codeBg,border:`1px solid ${color}25`,animation:"fadeIn 0.15s ease"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-        <div style={{fontSize:10,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.08em"}}>
-          {isKey?"Key Decode":isValue?"Value Decode":"Decoded"} {sectionLabel&&<span style={{color,textTransform:"none"}}> \u2014 {sectionLabel}</span>}
+    <div style={{marginTop:8,padding:"14px 18px",borderRadius:12,background:T.codeBg,border:`1px solid ${color}20`,boxShadow:`0 2px 12px ${color}08`}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+        <span style={{fontSize:12,fontWeight:800,color}}>{isKey?"\u26B7":isValue?"\u25C8":"\u2022"}</span>
+        <div style={{fontSize:11,fontWeight:700,color:T.dim,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+          {isKey?"Key":isValue?"Value":"Decoded"}
         </div>
-        {isKey&&section.keyType!==undefined&&<Badge color={color} small>type 0x{section.keyType.toString(16).padStart(2,"0")}</Badge>}
-        {decodedBytes.length>0&&<span style={{fontSize:10,color:T.dim,marginLeft:"auto"}}>{decodedBytes.length} bytes</span>}
+        {sectionLabel&&<span style={{fontSize:12,fontWeight:700,color,marginLeft:2}}>{sectionLabel}</span>}
+        {isKey&&section.keyType!==undefined&&<Badge color={color} small>0x{section.keyType.toString(16).padStart(2,"0")}</Badge>}
+        <span style={{fontSize:10,color:T.dim,marginLeft:"auto",fontFamily:"'JetBrains Mono',monospace"}}>{decodedBytes.length}B</span>
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+      <div style={{display:"flex",flexDirection:"column",gap:4}}>
         {conversions.map((cv,i)=>(
-          <div key={i} style={{display:"grid",gridTemplateColumns:"140px 1fr",gap:8,alignItems:"baseline",padding:"4px 8px",borderRadius:6,background:cv.color+"06"}}>
-            <span style={{fontSize:11,fontWeight:700,color:cv.color,fontFamily:"'JetBrains Mono',monospace"}}>{cv.label}</span>
-            <span style={{fontSize:11.5,color:T.soft,fontFamily:"'JetBrains Mono',monospace",wordBreak:"break-all"}}>{cv.value}</span>
+          <div key={i} style={{display:"grid",gridTemplateColumns:"130px 1fr",gap:10,alignItems:"baseline",padding:"5px 10px",borderRadius:8,background:cv.color+"08"}}>
+            <span style={{fontSize:10.5,fontWeight:700,color:cv.color,fontFamily:"'JetBrains Mono',monospace",textTransform:"uppercase",letterSpacing:"0.03em"}}>{cv.label}</span>
+            <span style={{fontSize:11.5,color:T.text,fontFamily:"'JetBrains Mono',monospace",wordBreak:"break-all",opacity:0.85}}>
+              {cv.value}{cv.note&&<span style={{color:T.dim,marginLeft:8,fontSize:10}}>({cv.note})</span>}
+            </span>
           </div>
         ))}
       </div>
@@ -1306,19 +1415,48 @@ function HexConversionPanel({hexBytes,section,allBytes,color}) {
 function HexViewerWithRoles({hex,sections,roleMap}) {
   const T = useC();
   const [hov,setHov] = useState(null);
+  const [pinned,setPinned] = useState(null); // last-hovered, kept visible
+  const setHovStable = useCallback((id) => {
+    if(id) { setHov(id); setPinned(id); }
+    else setHov(null);
+    // pinned stays — only cleared by hovering a new section
+  },[]);
+  const activeId = hov || pinned;
   const bytes = useMemo(() => hex.match(/.{1,2}/g)||[], [hex]);
   const bmap = useMemo(() => {
     const m = new Array(bytes.length).fill(null);
     if(sections) sections.forEach(s => { for(let i=s.start;i<Math.min(s.end,bytes.length);i++) m[i]=s; });
     return m;
   }, [bytes,sections]);
-  const hovSection = hov ? sections?.find(s=>s.id===hov) : null;
+  const hovSection = activeId ? sections?.find(s=>s.id===activeId) : null;
+
+  // Group sections by map for legend
+  const legendGroups = useMemo(()=>{
+    if(!sections) return [];
+    const groups = [];
+    let cur = null;
+    for(const s of sections){
+      const lbl = s.label;
+      let groupName = "Header";
+      if(lbl.startsWith("Global")||lbl==="Separator 0x00"&&(!cur||cur.name==="Header"||cur.name.startsWith("Global"))) groupName = "Global";
+      else if(lbl.match(/^In\d+:/)) groupName = lbl.match(/^(In\d+):/)[1];
+      else if(lbl.match(/^Out\d+:/)) groupName = lbl.match(/^(Out\d+):/)[1];
+      else if(lbl.startsWith("Separator")&&cur) groupName = cur.name; // attach separator to current group
+      else if(lbl.startsWith("Magic")) groupName = "Header";
+
+      if(!cur||cur.name!==groupName){
+        cur = {name:groupName,sections:[],color:s.color};
+        groups.push(cur);
+      }
+      cur.sections.push(s);
+    }
+    return groups;
+  },[sections]);
+
   // Map field-level labels back to map-level roleMap keys
   const hovRole = useMemo(()=>{
     if(!hovSection||!roleMap) return null;
-    // Direct match (for separators or legacy labels)
     if(roleMap[hovSection.label]) return roleMap[hovSection.label];
-    // Derive map name from field label: "In0: WITNESS_UTXO (value)" → "Input 0 Map"
     const lbl = hovSection.label;
     if(lbl.startsWith("Global")) return roleMap["Global Map"]||null;
     const inMatch = lbl.match(/^In(\d+):/);
@@ -1331,53 +1469,78 @@ function HexViewerWithRoles({hex,sections,roleMap}) {
     if(!hovSection) return null;
     return bytes.slice(hovSection.start,hovSection.end);
   },[hovSection,bytes]);
+
+  const roleColors = {"Creator":T.amber,"Updater":T.blue,"Signer":T.green,"Combiner":T.purple,"Finalizer":T.orange,"Extractor":T.cyan,"Constructor":T.teal};
+  const roleIcons = {"Creator":"\u2726","Updater":"\u2B06","Signer":"\u270D","Combiner":"\u2295","Finalizer":"\u25C9","Extractor":"\u2192","Constructor":"\u2692"};
+
   return (
-    <div>
-      <div style={{background:T.codeBg,borderRadius:10,padding:16,border:`1px solid ${T.border}`,lineHeight:2.1,overflowX:"auto"}}>
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {/* Hex byte grid */}
+      <div style={{background:T.codeBg,borderRadius:12,padding:16,border:`1px solid ${T.border}`,lineHeight:2.1,overflowX:"auto"}}>
         {bytes.map((b,i) => {
           const s=bmap[i]; const hi=hov&&s&&s.id===hov;
           const isKey=s?.isKey;
-          return <span key={i} onMouseEnter={()=>s&&setHov(s.id)} onMouseLeave={()=>setHov(null)} style={{
-            display:"inline-block",padding:"1px 3px",margin:"1px",fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,
-            color:hi?(T.isDark?"#fff":"#000"):(s?s.color:T.dim),opacity:isKey&&!hi?0.55:1,
+          return <span key={i} onMouseEnter={()=>s&&setHovStable(s.id)} onMouseLeave={()=>setHov(null)} style={{
+            display:"inline-block",width:22,textAlign:"center",padding:"1px 0",margin:"1px 0",
+            fontFamily:"'JetBrains Mono',monospace",fontSize:11.5,
+            color:hi?(T.isDark?"#fff":"#000"):(s?s.color:T.dim),opacity:isKey&&!hi?0.5:1,
             background:hi?s.color+"35":(s?s.color+(isKey?"05":"0a"):"transparent"),
-            borderRadius:3,cursor:s?"pointer":"default",borderBottom:`2px solid ${s?s.color+(hi?"90":(isKey?"20":"40")):"transparent"}`,transition:"all 0.12s",
+            borderRadius:3,cursor:s?"pointer":"default",borderBottom:`2px solid ${s?s.color+(hi?"90":(isKey?"15":"35")):"transparent"}`,
           }}>{b}</span>;
         })}
       </div>
-      {/* Legend with role annotation on hover */}
-      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:10}}>
-        {sections?.map(s=><div key={s.id} onMouseEnter={()=>setHov(s.id)} onMouseLeave={()=>setHov(null)} style={{
-          display:"flex",alignItems:"center",gap:6,padding:"4px 10px",borderRadius:6,cursor:"pointer",
-          background:hov===s.id?s.color+"18":"transparent",border:`1px solid ${hov===s.id?s.color+"40":"transparent"}`,transition:"all 0.15s",
-        }}>
-          <span style={{width:10,height:10,borderRadius:3,background:s.color,flexShrink:0}}/>
-          <span style={{fontSize:11.5,color:hov===s.id?s.color:T.soft,fontWeight:600}}>{s.label}</span>
-          <span style={{fontSize:10,color:T.dim}}>({s.end-s.start}b)</span>
-        </div>)}
+
+      {/* Grouped legend */}
+      <div style={{display:"flex",flexDirection:"column",gap:2}}>
+        {legendGroups.map((g,gi)=>{
+          const groupColor = g.name==="Header"?T.red:g.name==="Global"?T.amber:g.name.startsWith("In")?T.green:T.blue;
+          const icon = g.name==="Header"?"\u2234":g.name==="Global"?"\u2295":g.name.startsWith("In")?"\u2190":"\u2192";
+          return (
+            <div key={gi}>
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",borderRadius:8,background:groupColor+"06",borderLeft:`3px solid ${groupColor}40`,marginBottom:2}}>
+                <span style={{fontSize:11,opacity:0.6}}>{icon}</span>
+                <span style={{fontSize:11,fontWeight:800,color:groupColor,textTransform:"uppercase",letterSpacing:"0.06em"}}>{g.name}</span>
+                <span style={{fontSize:10,color:T.dim,marginLeft:"auto"}}>{g.sections.reduce((a,s)=>a+(s.end-s.start),0)}B</span>
+              </div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:3,paddingLeft:14,marginBottom:6}}>
+                {g.sections.map(s=>{
+                  const active=activeId===s.id;
+                  const isSep=s.label.startsWith("Separator");
+                  // Show just the field name, not the full "In0: WITNESS_UTXO (value)" label
+                  const shortLabel = s.fieldName ? s.fieldName+(s.isKey?" \u26B7":" \u25C8") : s.label.replace(/^(Global|In\d+|Out\d+): /,"");
+                  return <div key={s.id} onMouseEnter={()=>setHovStable(s.id)} onMouseLeave={()=>setHovStable(null)} style={{
+                    display:"flex",alignItems:"center",gap:5,padding:"3px 8px",borderRadius:6,cursor:"pointer",
+                    background:active?s.color+"18":"transparent",border:`1px solid ${active?s.color+"40":"transparent"}`,
+                    opacity:isSep?0.5:1,
+                  }}>
+                    <span style={{width:7,height:7,borderRadius:2,background:s.color,flexShrink:0,opacity:s.isKey?0.5:1}}/>
+                    <span style={{fontSize:10.5,color:active?s.color:T.soft,fontWeight:600,fontFamily:"'JetBrains Mono',monospace"}}>{shortLabel}</span>
+                    <span style={{fontSize:9,color:T.dim}}>{s.end-s.start}</span>
+                  </div>;
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
-      {/* Hex conversion panel */}
+
+      {/* Decode panel — pinned: stays visible after last hover */}
       {hovSection&&hovBytes&&<HexConversionPanel hexBytes={hovBytes} section={hovSection} allBytes={bytes} color={hovSection.color}/>}
-      {/* Role tooltip — enriched with role breakdown */}
       {hovRole&&(()=>{
-        const roleColors = {"Creator":T.amber,"Updater":T.blue,"Signer":T.green,"Combiner":T.purple,"Finalizer":T.orange,"Extractor":T.cyan,"Constructor":T.teal};
-        const roleIcons = {"Creator":"✦","Updater":"⬆","Signer":"✍","Combiner":"⊕","Finalizer":"◉","Extractor":"→","Constructor":"⚒"};
-        const detectedRoles = [];
-        for(const rn of Object.keys(roleColors)){
-          if(hovRole.includes(rn)) detectedRoles.push(rn);
-        }
-        return <div style={{marginTop:8,padding:"12px 16px",borderRadius:10,background:hovSection.color+"08",border:`1px solid ${hovSection.color}30`,animation:"fadeIn 0.15s ease"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-            <span style={{fontSize:16}}>{hovSection.label.includes("Global")?"⊕":hovSection.label.includes("Input")?"←":hovSection.label.includes("Output")?"→":"⊙"}</span>
-            <span style={{fontSize:13,fontWeight:800,color:hovSection.color}}>{hovSection.label}</span>
-            <span style={{fontSize:10,color:T.dim,marginLeft:"auto"}}>{hovSection.end-hovSection.start} bytes</span>
-          </div>
-          {detectedRoles.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-            {detectedRoles.map(rn=><span key={rn} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700,background:(roleColors[rn]||T.dim)+"15",color:roleColors[rn]||T.dim,border:`1px solid ${(roleColors[rn]||T.dim)}30`}}>{roleIcons[rn]||"•"} {rn}</span>)}
-          </div>}
-          <div style={{fontSize:12,color:T.soft,lineHeight:1.7}}>{hovRole}</div>
-        </div>;
-      })()}
+          const detectedRoles = [];
+          for(const rn of Object.keys(roleColors)){
+            if(hovRole.includes(rn)) detectedRoles.push(rn);
+          }
+          return <div style={{marginTop:8,padding:"14px 18px",borderRadius:12,background:hovSection.color+"06",border:`1px solid ${hovSection.color}20`,boxShadow:`0 2px 12px ${hovSection.color}08`}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              <span style={{fontSize:13,fontWeight:800,color:hovSection.color}}>{hovSection.label}</span>
+              {detectedRoles.length>0&&<div style={{display:"flex",gap:4,marginLeft:"auto"}}>
+                {detectedRoles.map(rn=><span key={rn} style={{display:"inline-flex",alignItems:"center",gap:3,padding:"2px 8px",borderRadius:5,fontSize:10,fontWeight:700,background:(roleColors[rn]||T.dim)+"12",color:roleColors[rn]||T.dim}}>{roleIcons[rn]||"\u2022"} {rn}</span>)}
+              </div>}
+            </div>
+            <div style={{fontSize:12,color:T.soft,lineHeight:1.7}}>{hovRole}</div>
+          </div>;
+        })()}
     </div>
   );
 }
